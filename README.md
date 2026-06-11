@@ -1,3 +1,5 @@
+
+```text
 ██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗      ██████╗██╗     ██╗
 ██╔══██╗██╔════╝██╔════╝██╔═══██╗████╗  ██║     ██╔════╝██║     ██║
 ██████╔╝█████╗  ██║     ██║   ██║██╔██╗ ██║     ██║     ██║     ██║
@@ -6,6 +8,7 @@
 ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝      ╚═════╝╚══════╝╚═╝
 
    recon-cli · External Attack Surface Recon
+```
 
 Herramienta CLI de reconocimiento automatizado orientada a auditorías BLACKBOX de 
 superficie de ataque externa (EASM), que automatiza OSINT, enumeración y análisis de 
