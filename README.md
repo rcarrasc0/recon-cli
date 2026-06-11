@@ -115,7 +115,7 @@ Requisitos
 - Python 3.11 recomendado
 - nmap instalado
 - testssl.sh disponible
-- entorno Linux (Kali recomendado)
+- entorno Linux (Kali recomendado, probado en Kali Linux 2026)
 
 ------------------------------------------------------------
 
