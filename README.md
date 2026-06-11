@@ -353,20 +353,19 @@ Solución recomendada:
 
 Roadmap
 
+- Detección WAF/CDN
+- API discovery (endpoints, versiones, Swagger/OpenAPI, GraphQL)
+- Fingerprinting avanzado (incluyendo tipo de API)
+- Integración con nuclei
 - Mejora de correlación CVE (version-aware)
+- Correlación con MITRE ATT&CK
 - Export JSON
 - Integración SIEM
-- Fingerprinting avanzado
-- Detección WAF/CDN
-- Integración con nuclei
-- Correlación con MITRE ATT&CK
 
 Futuro:
+
 - Generación de contexto para explotación asistida
-  (bloque exportable para Metasploit)
-  
-Bloque explotación (futuro):
-- Exportación de contexto técnico para Metasploit
+- Exportación de contexto técnico (Metasploit / tooling)
 - Identificación de vectores potenciales
 - Generación de apuntes para fase post-recon
 
