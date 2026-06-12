@@ -163,6 +163,10 @@ check_tool nmap
 check_tool testssl.sh
 check_tool python3
 
+if [ -f "recon-exec.sh" ]; then
+    chmod +x recon-exec.sh
+fi
+
 python3 -c "import shodan, sslyze, rich, click, reportlab" 2>/dev/null \
     && success "Módulos Python core → OK" \
     || error "Faltan módulos Python — revisa requirements.txt"
