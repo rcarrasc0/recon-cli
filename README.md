@@ -110,6 +110,14 @@ Cada módulo es independiente y puede ampliarse sin afectar al pipeline.
 
 ------------------------------------------------------------
 
+Descarga
+
+Última versión estable:
+https://github.com/rcarrasc0/recon-cli/releases/latest
+También puedes clonar el repositorio o descargar el código desde GitHub.
+
+------------------------------------------------------------
+
 Requisitos
 
 - Python 3.11 recomendado
