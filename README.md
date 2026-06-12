@@ -87,6 +87,7 @@ Características
 Estructura del proyecto
 
 ```text
+
 recon-cli/
 ├── main.py              Entry point CLI
 ├── config.py            Carga de entorno y configuración
@@ -100,12 +101,13 @@ recon-cli/
 │   └── cves.py          CVEs (NVD)
 ├── report/
 │   └── pdf_gen.py       Generación de informe PDF
-├── reports/
-├── recon-exec.sh
-├── .env.example
-├── requirements.txt
-├── setup.sh
+├── reports/              Directorio de salida para informes generados (no versionado)
+├── recon-exec.sh         Launcher CLI: activa el entorno y ejecuta el pipeline completo
+├── .env.example          Plantilla de variables de entorno (configuración opcional)
+├── requirements.txt      Dependencias Python del proyecto
+└── setup.sh              Script de instalación (entorno virtual + dependencias)
 ```
+Los scripts `setup.sh` y `recon-exec.sh` automatizan completamente la instalación y ejecución, reduciendo la interacción manual del usuario.
 
 Cada módulo es independiente y puede ampliarse sin afectar al pipeline.
 
