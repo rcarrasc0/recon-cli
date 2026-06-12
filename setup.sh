@@ -167,9 +167,11 @@ if [ -f "recon-exec.sh" ]; then
     chmod +x recon-exec.sh
 fi
 
-python3 -c "import shodan, sslyze, rich, click, reportlab" 2>/dev/null \
-    && success "Módulos Python core → OK" \
-    || error "Faltan módulos Python — revisa requirements.txt"
+if .venv/bin/python -c "import shodan, sslyze, rich, click, reportlab" 2>/dev/null; then
+    echo "[✓] Módulos Python core → OK"
+else
+    echo "[✗] Faltan módulos Python — revisa requirements.txt"
+fi
 
 # ── 9. Empaquetar distribución ZIP ────────────────────────────
 info "Generando paquete de distribución..."
