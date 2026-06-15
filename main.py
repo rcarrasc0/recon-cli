@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────
-#  recon-cli · main.py
+#  recon-cli · main.py  v1.1.0
 #  Entry point principal. Orquesta todas las fases del análisis.
 # ─────────────────────────────────────────────────────────────
 
@@ -9,7 +9,6 @@ import click
 from datetime import datetime
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
 from rich import box
 from rich.table import Table
 
@@ -20,6 +19,7 @@ from modules.leaks import run_leaklookup
 from modules.enum import run_enumeration
 from modules.ssl_tls import run_ssl_analysis
 from modules.headers import run_headers_analysis
+from modules.waf_cdn import run_waf_cdn
 from modules.cves import run_cve_lookup
 from report.pdf_gen import generate_report
 
@@ -32,6 +32,7 @@ BANNER = """
 ██╔══██╗██╔══╝  ██║     ██║   ██║██║╚██╗██║     ██║     ██║     ██║
 ██║  ██║███████╗╚██████╗╚██████╔╝██║ ╚████║     ╚██████╗███████╗██║
 ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝      ╚═════╝╚══════╝╚═╝
+                                                            v1.1.0
 """
 
 
@@ -40,49 +41,41 @@ BANNER = """
 @click.option("--scope", default="blackbox", show_default=True,
               type=click.Choice(["blackbox", "greybox"]),
               help="Tipo de análisis")
-@click.option("--skip-leaks", is_flag=True, default=False,
-              help="Omitir consulta a Leak-Lookup")
-@click.option("--skip-shodan", is_flag=True, default=False,
-              help="Omitir consulta a Shodan")
-@click.option("--skip-ssl", is_flag=True, default=False,
-              help="Omitir análisis SSL/TLS")
-@click.option("--skip-cves", is_flag=True, default=False,
-              help="Omitir búsqueda de CVEs")
-@click.option("--output", "-o", default=None,
-              help="Ruta del PDF de salida (opcional)")
-@click.option("--verbose", "-v", is_flag=True, default=False,
-              help="Mostrar output detallado")
-def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_cves, output, verbose):
+@click.option("--skip-leaks",  is_flag=True, default=False, help="Omitir Leak-Lookup")
+@click.option("--skip-shodan", is_flag=True, default=False, help="Omitir Shodan")
+@click.option("--skip-ssl",    is_flag=True, default=False, help="Omitir análisis SSL/TLS")
+@click.option("--skip-waf",    is_flag=True, default=False, help="Omitir detección WAF/CDN")
+@click.option("--skip-cves",   is_flag=True, default=False, help="Omitir búsqueda de CVEs")
+@click.option("--output", "-o", default=None, help="Ruta del PDF de salida")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Output detallado")
+def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, output, verbose):
     """
     recon-cli — Framework de reconocimiento y análisis de seguridad.
 
     TARGET puede ser un dominio (ejemplo.com) o una dirección IP (1.2.3.4).
 
     Ejemplos:\n
-      python main.py ejemplo.com\n
-      python main.py 1.2.3.4 --skip-leaks\n
-      python main.py ejemplo.com --scope blackbox --output ./reports/resultado.pdf
+      ./recon-exec.sh ejemplo.com\n
+      ./recon-exec.sh 1.2.3.4 --skip-leaks --verbose\n
+      ./recon-exec.sh ejemplo.com --scope blackbox --output ./reports/out.pdf
     """
 
     start_time = datetime.now()
 
-    # Banner
     console.print(f"[bold cyan]{BANNER}[/bold cyan]")
     console.print(Panel.fit(
         f"[bold]Target:[/bold] [green]{target}[/green]  |  "
         f"[bold]Scope:[/bold] [yellow]{scope.upper()}[/yellow]  |  "
         f"[bold]Inicio:[/bold] {start_time.strftime('%Y-%m-%d %H:%M:%S')}",
-        title="[bold white]recon-cli[/bold white]",
+        title="[bold white]recon-cli v1.1.0[/bold white]",
         border_style="cyan"
     ))
 
-    # Cargar configuración
     config = load_config()
-    config["verbose"] = verbose
-    config["scope"] = scope
+    config["verbose"]    = verbose
+    config["scope"]      = scope
     config["start_time"] = start_time
 
-    # Validar target
     target_info = validate_target(target)
     if not target_info:
         console.print(f"[bold red][✗][/bold red] Target inválido: {target}")
@@ -90,20 +83,20 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_cves, output, ver
 
     console.print(f"\n[cyan][*][/cyan] Tipo de target: [bold]{target_info['type'].upper()}[/bold]")
 
-    # ── Resultados acumulados ─────────────────────────────────
     results = {
-        "target": target,
+        "target":      target,
         "target_info": target_info,
-        "scope": scope,
-        "start_time": start_time,
-        "osint": {},
-        "shodan": {},
-        "leaks": {},
+        "scope":       scope,
+        "start_time":  start_time,
+        "osint":       {},
+        "shodan":      {},
+        "leaks":       {},
         "enumeration": {},
-        "ssl_tls": {},
-        "headers": {},
-        "cves": [],
-        "findings": [],
+        "ssl_tls":     {},
+        "headers":     {},
+        "waf_cdn":     {},
+        "cves":        [],
+        "findings":    [],
     }
 
     # ── FASE 1: OSINT ─────────────────────────────────────────
@@ -139,84 +132,73 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_cves, output, ver
     _phase_header("6", "Cabeceras HTTP & CSP")
     results["headers"] = run_headers_analysis(target, target_info, config)
 
-    # ── FASE 7: CVEs ──────────────────────────────────────────
+    # ── FASE 7: WAF/CDN ───────────────────────────────────────
+    if not skip_waf:
+        _phase_header("7", "Detección WAF/CDN")
+        results["waf_cdn"] = run_waf_cdn(target, target_info, config)
+    else:
+        _skip_phase("7", "WAF/CDN", True, False)
+
+    # ── FASE 8: CVEs ──────────────────────────────────────────
     if not skip_cves:
-        _phase_header("7", "Búsqueda de CVEs")
+        _phase_header("8", "Búsqueda de CVEs")
         results["cves"] = run_cve_lookup(results, config)
     else:
-        _skip_phase("7", "CVEs", True, False)
+        _skip_phase("8", "CVEs", True, False)
 
     # ── Consolidar hallazgos ──────────────────────────────────
     results["findings"] = _consolidate_findings(results)
     results["end_time"] = datetime.now()
     results["duration"] = results["end_time"] - start_time
 
-    # ── Resumen en consola ────────────────────────────────────
     _print_summary(results)
 
-    # ── FASE 8: Generar PDF ───────────────────────────────────
-    _phase_header("8", "Generando Informe PDF")
-    pdf_path = output or f"{config.get('REPORT_OUTPUT_DIR', './reports/')}{target.replace('.', '_')}_{start_time.strftime('%Y%m%d_%H%M%S')}.pdf"
+    # ── FASE 9: PDF ───────────────────────────────────────────
+    _phase_header("9", "Generando Informe PDF")
+    pdf_path = output or (
+        f"{config.get('REPORT_OUTPUT_DIR','./reports/')}"
+        f"{target.replace('.','_')}_{start_time.strftime('%Y%m%d_%H%M%S')}.pdf"
+    )
     generate_report(results, pdf_path, config)
-    console.print(f"\n[bold green][✓][/bold green] Informe generado: [underline]{pdf_path}[/underline]")
-    console.print(f"[bold green][✓][/bold green] Análisis completado en {results['duration'].seconds}s\n")
+    console.print(f"\n[bold green][✓][/bold green] Informe: [underline]{pdf_path}[/underline]")
+    console.print(f"[bold green][✓][/bold green] Completado en {results['duration'].seconds}s\n")
 
 
-# ── Helpers de UI ─────────────────────────────────────────────
+def _phase_header(num, name):
+    console.print(f"\n[bold cyan]━━━ Fase {num}: {name}[/bold cyan]")
 
-def _phase_header(num: str, name: str):
-    console.print(f"\n[bold cyan]━━━ Fase {num}: {name} [/bold cyan]")
-
-
-def _skip_phase(num: str, name: str, flagged: bool, no_key: bool):
+def _skip_phase(num, name, flagged, no_key):
     reason = "flag --skip activo" if flagged else "API key no configurada"
     console.print(f"\n[bold cyan]━━━ Fase {num}: {name}[/bold cyan] [yellow](omitida · {reason})[/yellow]")
 
-
-def _consolidate_findings(results: dict) -> list:
-    """Agrega todos los hallazgos de todas las fases en una lista unificada."""
+def _consolidate_findings(results):
     findings = []
-    for phase in ["osint", "shodan", "leaks", "enumeration", "ssl_tls", "headers"]:
-        phase_findings = results.get(phase, {}).get("findings", [])
-        findings.extend(phase_findings)
+    for phase in ["osint","shodan","leaks","enumeration","ssl_tls","headers","waf_cdn"]:
+        findings.extend(results.get(phase, {}).get("findings", []))
     for cve in results.get("cves", []):
         findings.append({
-            "phase": "CVEs",
-            "title": f"CVE: {cve.get('id', 'N/A')}",
-            "description": cve.get("description", ""),
-            "severity": cve.get("severity", "MEDIUM"),
-            "cvss": cve.get("cvss_score", 0.0),
-            "remediation": cve.get("remediation", "Actualizar a versión no vulnerable."),
+            "phase":       "CVEs",
+            "title":       f"CVE: {cve.get('id','N/A')}",
+            "description": cve.get("description",""),
+            "severity":    cve.get("severity","MEDIUM"),
+            "cvss":        cve.get("cvss_score", 0.0),
+            "remediation": cve.get("remediation","Actualizar a versión no vulnerable."),
         })
     return findings
 
-
-def _print_summary(results: dict):
-    console.print("\n")
-    findings = results.get("findings", [])
-
-    counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
-    for f in findings:
-        sev = f.get("severity", "INFO").upper()
-        counts[sev] = counts.get(sev, 0) + 1
+def _print_summary(results):
+    counts = {"CRITICAL":0,"HIGH":0,"MEDIUM":0,"LOW":0,"INFO":0}
+    for f in results.get("findings",[]):
+        sev = f.get("severity","INFO").upper()
+        counts[sev] = counts.get(sev,0) + 1
 
     table = Table(title="Resumen de Hallazgos", box=box.ROUNDED, border_style="cyan")
     table.add_column("Severidad", style="bold", justify="center")
-    table.add_column("Cantidad", justify="center")
-
-    severity_styles = {
-        "CRITICAL": "bold red",
-        "HIGH": "red",
-        "MEDIUM": "yellow",
-        "LOW": "cyan",
-        "INFO": "white",
-    }
+    table.add_column("Cantidad",  justify="center")
+    styles = {"CRITICAL":"bold red","HIGH":"red","MEDIUM":"yellow","LOW":"cyan","INFO":"white"}
     for sev, count in counts.items():
-        style = severity_styles.get(sev, "white")
-        table.add_row(f"[{style}]{sev}[/{style}]", str(count))
-
+        table.add_row(f"[{styles[sev]}]{sev}[/{styles[sev]}]", str(count))
     console.print(table)
-
 
 if __name__ == "__main__":
     cli()
