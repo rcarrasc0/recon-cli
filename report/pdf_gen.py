@@ -230,6 +230,11 @@ def generate_report(results: dict, output_path: str, config: dict):
     # ── ANÁLISIS DE CABECERAS ─────────────────────────────────
     story += _build_headers_section(results, styles, content_width)
 
+    # ── WAF / CDN ─────────────────────────────────────────────
+    if results.get("waf_cdn"):
+        story.append(PageBreak())
+        story += _build_waf_section(results, styles, content_width)
+
     # ── OSINT & RECONOCIMIENTO ────────────────────────────────
     story.append(PageBreak())
     story += _build_osint_section(results, styles, content_width)
@@ -304,9 +309,9 @@ def _build_cover(results, config, styles, w):
 
     # Metadata grid
     meta_rows = [
-        ["Tipo de análisis", "blackbox"],
+        ["Tipo de análisis", scope],
         ["Fecha de análisis", start_time.strftime("%d/%m/%Y %H:%M:%S UTC")],
-        ["Autor del informe", "Rafael Carrasco"],
+        ["Autor del informe", author],
         ["Clasificación", "CONFIDENCIAL"],
     ]
     meta_style = ParagraphStyle("meta_k", fontName="Helvetica", fontSize=10, textColor=HexColor("#8B949E"))
@@ -505,7 +510,8 @@ def _build_scope_section(results, styles, w):
         ["Fase 4 — Enumeración",       "Subdominios, hosts activos, detección de tecnologías"],
         ["Fase 5 — SSL/TLS",           "Protocolos, cifrados, certificado, HSTS, vulnerabilidades"],
         ["Fase 6 — Cabeceras HTTP",    "Security headers, CSP, cookies, fugas de información"],
-        ["Fase 7 — CVEs",              "Búsqueda en NVD/NIST por productos y versiones detectadas"],
+        ["Fase 7 — WAF/CDN",           "Detección de Cloudflare, AWS WAF/CloudFront y otros proveedores"],
+        ["Fase 8 — CVEs",              "Búsqueda en NVD/NIST por productos y versiones detectadas"],
     ]
 
     t2 = Table(phases, colWidths=[w * 0.3, w * 0.7])
@@ -845,6 +851,149 @@ def _build_osint_section(results, styles, w):
             ("FONTSIZE",      (0, 0), (-1,-1), 8),
             ("ROWBACKGROUNDS",(0, 0), (-1, -1), [C_BG_LIGHT, colors.white]),
             ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
+        ]))
+        story.append(t)
+
+    # DNS
+    dns_records = osint.get("dns_records", {})
+    if dns_records:
+        story.append(Paragraph("6.2 Registros DNS", styles["h2"]))
+
+    # Subdominios
+    subdomains = enum.get("subdomains", [])
+    if subdomains:
+        story.append(Paragraph("6.3 Subdominios", styles["h2"]))
+
+    return story
+
+
+
+    story = []
+    waf   = results.get("waf_cdn", {})
+
+    story.append(Paragraph("6. Detección WAF/CDN", styles["h1"]))
+    story.append(ColorLine(w, C_ACCENT, 2))
+    story.append(Spacer(1, 0.3 * cm))
+
+    detected = waf.get("detected", [])
+
+    if not detected:
+        story.append(Paragraph(
+            "No se detectó ningún WAF o CDN conocido delante del servidor de origen.",
+            styles["body"]
+        ))
+    else:
+        providers_str = ", ".join(d["provider"] for d in detected)
+        story.append(Paragraph(
+            f"Se ha identificado la presencia de <b>{providers_str}</b> "
+            f"intermediando el tráfico hacia el servidor de origen.",
+            styles["body"]
+        ))
+        story.append(Spacer(1, 0.3 * cm))
+
+        # Tabla de proveedores detectados
+        rows = [[
+            Paragraph("<b>Proveedor</b>",    styles["body"]),
+            Paragraph("<b>Tipo</b>",         styles["body"]),
+            Paragraph("<b>Confianza</b>",    styles["body"]),
+            Paragraph("<b>Detectado por</b>",styles["body"]),
+        ]]
+        for d in detected:
+            rows.append([
+                Paragraph(d.get("provider",""),  styles["body_small"]),
+                Paragraph(d.get("type",""),      styles["body_small"]),
+                Paragraph(d.get("confidence",""),styles["body_small"]),
+                Paragraph(", ".join(d.get("matched_by",[]))[:80], styles["body_small"]),
+            ])
+
+        t = Table(rows, colWidths=[w*0.25, w*0.15, w*0.15, w*0.45])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),  C_PRIMARY),
+            ("TEXTCOLOR",     (0,0),(-1,0),  colors.white),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.white, C_BG_LIGHT]),
+            ("GRID",          (0,0),(-1,-1), 0.5, C_BORDER),
+            ("TOPPADDING",    (0,0),(-1,-1), 5),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+            ("LEFTPADDING",   (0,0),(-1,-1), 8),
+        ]))
+        story.append(t)
+
+    # IP provider
+    ip_prov = waf.get("ip_provider", {})
+    if ip_prov.get("provider"):
+        story.append(Spacer(1, 0.3 * cm))
+        story.append(Paragraph("6.1 Rango IP", styles["h2"]))
+        ip_rows = [
+            ["Proveedor",    ip_prov.get("provider","N/A")],
+            ["IP detectada", ip_prov.get("matched_ip","N/A")],
+            ["Rango CIDR",   ip_prov.get("matched_range","N/A")],
+        ]
+        t2 = Table(ip_rows, colWidths=[w*0.3, w*0.7])
+        t2.setStyle(TableStyle([
+            ("FONTNAME",      (0,0),(0,-1), "Helvetica-Bold"),
+            ("FONTSIZE",      (0,0),(-1,-1),8),
+            ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_BG_LIGHT, colors.white]),
+            ("GRID",          (0,0),(-1,-1),0.5, C_BORDER),
+            ("TOPPADDING",    (0,0),(-1,-1),5),
+            ("BOTTOMPADDING", (0,0),(-1,-1),5),
+            ("LEFTPADDING",   (0,0),(-1,-1),8),
+        ]))
+        story.append(t2)
+
+    # DNS hints
+    dns = waf.get("dns_hints", {})
+    if dns.get("cname_provider"):
+        story.append(Spacer(1, 0.3 * cm))
+        story.append(Paragraph("6.2 CNAME hacia CDN", styles["h2"]))
+        story.append(Paragraph(
+            f"El registro CNAME apunta a <b>{dns.get('cname_value','N/A')}</b> "
+            f"({dns.get('cname_provider','N/A')}).",
+            styles["body"]
+        ))
+
+    # Block test
+    block = waf.get("block_test", {})
+    if block.get("waf_detected"):
+        story.append(Spacer(1, 0.3 * cm))
+        story.append(Paragraph("6.3 Comportamiento de bloqueo WAF", styles["h2"]))
+        story.append(Paragraph(
+            f"El servidor respondió con comportamiento de WAF ante rutas de prueba. "
+            f"Proveedor identificado: <b>{block.get('provider','WAF genérico')}</b> "
+            f"(HTTP {block.get('status_code','N/A')}).",
+            styles["body"]
+        ))
+
+    return story
+
+
+
+    story = []
+    osint = results.get("osint", {})
+    enum  = results.get("enumeration", {})
+
+    story.append(Paragraph("7. OSINT & Reconocimiento", styles["h1"]))
+    story.append(ColorLine(w, C_ACCENT, 2))
+    story.append(Spacer(1, 0.3 * cm))
+
+    # WHOIS
+    whois_data = osint.get("whois", {})
+    if whois_data:
+        story.append(Paragraph("7.1 WHOIS", styles["h2"]))
+        whois_rows = [
+            ["Registrador",     whois_data.get("registrar", "N/A")],
+            ["Organización",    whois_data.get("org", "N/A")],
+            ["País",            whois_data.get("country", "N/A")],
+            ["Creación",        str(whois_data.get("creation_date", "N/A"))[:30]],
+            ["Expiración",      str(whois_data.get("expiration_date", "N/A"))[:30]],
+            ["Name Servers",    ", ".join(whois_data.get("name_servers", []))[:80]],
+            ["Emails WHOIS",    ", ".join(whois_data.get("emails", []))[:80] or "N/A"],
+        ]
+        t = Table(whois_rows, colWidths=[w * 0.25, w * 0.75])
+        t.setStyle(TableStyle([
+            ("FONTNAME",      (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE",      (0, 0), (-1,-1), 8),
+            ("ROWBACKGROUNDS",(0, 0), (-1, -1), [C_BG_LIGHT, colors.white]),
+            ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
             ("TOPPADDING",    (0, 0), (-1, -1), 5),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ("LEFTPADDING",   (0, 0), (-1, -1), 8),
@@ -855,7 +1004,7 @@ def _build_osint_section(results, styles, w):
     dns_records = osint.get("dns_records", {})
     if dns_records:
         story.append(Spacer(1, 0.3 * cm))
-        story.append(Paragraph("6.2 Registros DNS", styles["h2"]))
+        story.append(Paragraph("7.2 Registros DNS", styles["h2"]))
         dns_rows = [[Paragraph("<b>Tipo</b>", styles["body"]), Paragraph("<b>Valor</b>", styles["body"])]]
         for rtype, values in dns_records.items():
             for i, v in enumerate(values):
@@ -879,7 +1028,7 @@ def _build_osint_section(results, styles, w):
     subdomains = enum.get("subdomains", [])
     if subdomains:
         story.append(Spacer(1, 0.3 * cm))
-        story.append(Paragraph(f"6.3 Subdominios ({len(subdomains)} encontrados)", styles["h2"]))
+        story.append(Paragraph(f"7.3 Subdominios ({len(subdomains)} encontrados)", styles["h2"]))
         sub_rows = [[
             Paragraph("<b>FQDN</b>",  styles["body"]),
             Paragraph("<b>IPs</b>",   styles["body"]),
@@ -907,12 +1056,52 @@ def _build_osint_section(results, styles, w):
     return story
 
 
+# ── WAF/CDN ───────────────────────────────────────────────────
+def _build_waf_section(results, styles, w):
+    story = []
+    waf   = results.get("waf_cdn", {})
+
+    story.append(Paragraph("7. Detección WAF/CDN", styles["h1"]))
+    story.append(ColorLine(w, C_ACCENT, 2))
+    story.append(Spacer(1, 0.3 * cm))
+
+    detected = waf.get("detected", [])
+
+    if not detected:
+        story.append(Paragraph(
+            "No se detectó ningún WAF o CDN conocido delante del servidor de origen.",
+            styles["body"]
+        ))
+    else:
+        providers_str = ", ".join(d["provider"] for d in detected)
+        story.append(Paragraph(
+            f"Se ha identificado la presencia de <b>{providers_str}</b> "
+            f"intermediando el tráfico hacia el servidor de origen.",
+            styles["body"]
+        ))
+
+    # Subbloques numerados correctos
+    ip_prov = waf.get("ip_provider", {})
+    if ip_prov.get("provider"):
+        story.append(Paragraph("7.1 Rango IP", styles["h2"]))
+
+    dns = waf.get("dns_hints", {})
+    if dns.get("cname_provider"):
+        story.append(Paragraph("7.2 CNAME hacia CDN", styles["h2"]))
+
+    block = waf.get("block_test", {})
+    if block.get("waf_detected"):
+        story.append(Paragraph("7.3 Comportamiento de bloqueo WAF", styles["h2"]))
+
+    return story
+
+
 # ── CVEs ──────────────────────────────────────────────────────
 def _build_cves_section(results, styles, w):
     story = []
     cves  = results.get("cves", [])
 
-    story.append(Paragraph("7. CVEs Identificados", styles["h1"]))
+    story.append(Paragraph("8. CVEs Identificados", styles["h1"]))
     story.append(ColorLine(w, C_ACCENT, 2))
     story.append(Spacer(1, 0.3 * cm))
 
@@ -979,7 +1168,7 @@ def _build_cves_section(results, styles, w):
 # ── TABLA CVSS CONSOLIDADA ────────────────────────────────────
 def _build_cvss_table(results, styles, w):
     story = []
-    story.append(Paragraph("8. Tabla CVSS Consolidada", styles["h1"]))
+    story.append(Paragraph("9. Tabla CVSS Consolidada", styles["h1"]))
     story.append(ColorLine(w, C_ACCENT, 2))
     story.append(Spacer(1, 0.3 * cm))
 
@@ -1030,7 +1219,7 @@ def _build_cvss_table(results, styles, w):
 # ── MITIGACIONES ──────────────────────────────────────────────
 def _build_mitigations_section(results, styles, w):
     story = []
-    story.append(Paragraph("9. Propuestas de Mitigación", styles["h1"]))
+    story.append(Paragraph("10. Propuestas de Mitigación", styles["h1"]))
     story.append(ColorLine(w, C_ACCENT, 2))
     story.append(Spacer(1, 0.3 * cm))
 
@@ -1106,5 +1295,3 @@ def _build_mitigations_section(results, styles, w):
         f"Este documento es confidencial y está destinado exclusivamente al equipo de seguridad autorizado.</i>",
         styles["body_small"]
     ))
-
-    return story
