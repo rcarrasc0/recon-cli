@@ -150,28 +150,26 @@ fi
 # ── 8. Verificación final ─────────────────────────────────────
 echo ""
 info "Verificando herramientas..."
-
+ 
 check_tool() {
-    if command -v "$1" &>/dev/null; then
-        success "$1 → $(command -v "$1")"
-    else
-        warn "$1 → NO encontrado (funcionalidad limitada)"
-    fi
+    command -v "$1" &>/dev/null \
+        && success "$1 → $(command -v "$1")" \
+        || warn "$1 → no encontrado (funcionalidad limitada)"
 }
-
 check_tool nmap
 check_tool testssl.sh
 check_tool python3
-
-if [ -f "recon-exec.sh" ]; then
-    chmod +x recon-exec.sh
-fi
-
-if .venv/bin/python -c "import shodan, sslyze, rich, click, reportlab" 2>/dev/null; then
-    echo "[✓] Módulos Python core → OK"
+ 
+# Validación simplificada (sslyze excluido: no compatible con Python 3.13)
+if .venv/bin/python -c "import shodan, rich, click, reportlab" 2>/dev/null; then
+    success "Módulos Python core → OK"
 else
     echo "[✗] Faltan módulos Python — revisa requirements.txt"
 fi
+ 
+[[ -f "recon-exec.sh" ]] && chmod +x recon-exec.sh && success "recon-exec.sh → ejecutable"
+ 
+warn "sslyze puede no ser compatible con Python 3.13"
 
 # ── 9. Empaquetar distribución ZIP ────────────────────────────
 info "Generando paquete de distribución..."
