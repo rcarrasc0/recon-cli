@@ -1295,3 +1295,6 @@ def _build_mitigations_section(results, styles, w):
         f"Este documento es confidencial y está destinado exclusivamente al equipo de seguridad autorizado.</i>",
         styles["body_small"]
     ))
+
+    return story
+    
