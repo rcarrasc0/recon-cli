@@ -54,7 +54,9 @@ Arquitectura
 
 El flujo sigue un modelo en pipeline:
 
-Input → Reconocimiento → Enumeración → Análisis → Scoring → Reporte
+```
+Input → Reconocimiento → Enumeración → Análisis → WAF/CDN → Scoring → Reporte
+```
 
 Cada fase es independiente pero encadenada, permitiendo:
 
@@ -66,28 +68,24 @@ Cada fase es independiente pero encadenada, permitiendo:
 
 Características
 
-- OSINT:
-  WHOIS, DNS, AXFR, ASN/BGP, crt.sh
-- Integración Shodan (opcional)
-- Integración Leak-Lookup (opcional)
-- Enumeración de subdominios
-- Descubrimiento de hosts activos HTTP/HTTPS
-- Fingerprinting de tecnologías
-- Análisis SSL/TLS:
-  - sslyze
-  - nmap ssl-enum-ciphers
-- Cabeceras HTTP y CSP
-- HSTS
-- Correlación con CVEs (NVD)
-- Scoring por CVSS
-- Generación de informe PDF
+- **OSINT:** WHOIS, DNS, AXFR, ASN/BGP, crt.sh
+- **Integración Shodan** (opcional)
+- **Integración Leak-Lookup** (opcional)
+- **Enumeración de subdominios** y hosts activos HTTP/HTTPS
+- **Fingerprinting de tecnologías**
+- **Análisis SSL/TLS:** sslyze + nmap ssl-enum-ciphers
+- **Cabeceras HTTP y CSP**
+- **HSTS**
+- **Detección WAF/CDN:** Cloudflare, AWS WAF/CloudFront, Akamai, Fastly, Sucuri, Imperva
+- **Correlación con CVEs** (NVD/NIST)
+- **Scoring por CVSS**
+- **Generación de informe PDF** estructurado
 
 ------------------------------------------------------------
 
 Estructura del proyecto
 
 ```text
-
 recon-cli/
 ├── main.py              Entry point CLI
 ├── config.py            Carga de entorno y configuración
@@ -98,14 +96,15 @@ recon-cli/
 │   ├── enum.py          Subdominios y tecnologías
 │   ├── ssl_tls.py       SSL/TLS (sslyze + nmap)
 │   ├── headers.py       Cabeceras HTTP, CSP, HSTS
-│   └── cves.py          CVEs (NVD)
+│   ├── waf_cdn.py       Detección WAF/CDN (Cloudflare, AWS, Akamai...)
+│   └── cves.py          CVEs (NVD/NIST)
 ├── report/
 │   └── pdf_gen.py       Generación de informe PDF
-├── reports/              Directorio de salida para informes generados (no versionado)
-├── recon-exec.sh         Launcher CLI: activa el entorno y ejecuta el pipeline completo
-├── .env.example          Plantilla de variables de entorno (configuración opcional)
-├── requirements.txt      Dependencias Python del proyecto
-└── setup.sh              Script de instalación (entorno virtual + dependencias)
+├── reports/             Directorio de salida (no versionado)
+├── recon-exec.sh        Launcher CLI con validación de parámetros
+├── .env.example         Plantilla de variables de entorno
+├── requirements.txt     Dependencias Python
+└── setup.sh             Script de instalación completo
 ```
 Los scripts `setup.sh` y `recon-exec.sh` automatizan completamente la instalación y ejecución, reduciendo la interacción manual del usuario.
 
@@ -134,10 +133,12 @@ Requisitos
 
 Instalación
 
-git clone <repo>
+```bash
+git clone https://github.com/rcarrasc0/recon-cli.git
 cd recon-cli
 chmod +x setup.sh
 ./setup.sh
+```
 
 El script:
 - instala dependencias del sistema
@@ -152,28 +153,63 @@ Configuración
 
 Editar el fichero .env:
 
+```env
 SHODAN_API_KEY=
 LEAKLOOKUP_API_KEY=
 NVD_API_KEY=
 
 REPORT_AUTHOR=
 REPORT_CLASSIFICATION=
+```
 
 ------------------------------------------------------------
 
 Uso
 
-./recon-exec.sh dominio.com
+```bash
+./recon-exec.sh <dominio|IP> [opciones]
+```
 
-El launcher:
+El launcher `recon-exec.sh`:
 
 - activa automáticamente el entorno virtual
 - ejecuta el pipeline completo
 - carga configuración del entorno
 
-Ejemplo:
+Opciones disponibles:
 
+| Opción | Descripción |
+|---|---|
+| `--scope [blackbox\|greybox]` | Tipo de análisis (default: blackbox) |
+| `--skip-leaks` | Omitir consulta a Leak-Lookup |
+| `--skip-shodan` | Omitir consulta a Shodan |
+| `--skip-ssl` | Omitir análisis SSL/TLS |
+| `--skip-waf` | Omitir detección WAF/CDN |
+| `--skip-cves` | Omitir búsqueda de CVEs |
+| `--output <ruta.pdf>` | Ruta del informe PDF de salida |
+| `--verbose / -v` | Output detallado por fase |
+
+Ejemplos de ejecución:
+
+```bash
+# Análisis completo
 ./recon-exec.sh example.com
+
+# Con output detallado
+./recon-exec.sh example.com --verbose
+
+# Omitir Leak-Lookup y Shodan (sin API keys)
+./recon-exec.sh example.com --skip-leaks --skip-shodan
+
+# Sin API keys y con verbose
+./recon-exec.sh example.com --skip-leaks --skip-shodan --verbose
+
+# Omitir detección WAF/CDN
+./recon-exec.sh example.com --skip-waf
+
+# Guardar informe en ruta específica
+./recon-exec.sh example.com --output /tmp/informe.pdf
+```
 
 Salida esperada:
 
@@ -188,92 +224,71 @@ Tiempo estimado: 1–3 minutos dependiendo del target
 
 ------------------------------------------------------------
 
-Flujo interno simplificado:
-
-1. Recopilación OSINT
-2. Generación de lista de targets
-3. Resolución y filtrado de activos
-4. Análisis HTTP/SSL
-5. Enriquecimiento con CVEs
-6. Generación de informe
-
-------------------------------------------------------------
-
 Fases del análisis
 
-1. OSINT & Reconocimiento
-   - WHOIS
-   - DNS
-   - AXFR
-   - crt.sh
-   - ASN/BGP
+| # | Fase | Descripción |
+|---|---|---|
+| 1 | **OSINT & Reconocimiento** | WHOIS, DNS, AXFR, crt.sh, ASN/BGP |
+| 2 | **Shodan** | Servicios expuestos, puertos, banners, CVEs indexados |
+| 3 | **Leak-Lookup** | Credenciales y emails filtrados en brechas conocidas |
+| 4 | **Enumeración & Descubrimiento** | Subdominios, hosts activos, fingerprinting de tecnologías |
+| 5 | **Análisis SSL/TLS** | Protocolos, cifrados, certificado, HSTS, vulnerabilidades |
+| 6 | **Cabeceras HTTP & CSP** | Security headers, CSP, cookies, fugas de información |
+| 7 | **Detección WAF/CDN** | Cloudflare, AWS WAF/CloudFront, Akamai, Fastly, Sucuri, Imperva |
+| 8 | **CVEs** | Búsqueda en NVD/NIST por productos y versiones detectadas |
+| 9 | **Informe PDF** | Generación de informe estructurado con hallazgos y scoring CVSS |
 
-2. Enumeración & Descubrimiento
-   - Subdominios
-   - Resolución DNS
-   - Hosts activos
-   - Tecnologías
+Detección WAF/CDN (v1.1.0)
 
-3. Análisis de Seguridad
-   - SSL/TLS (sslyze + nmap)
-   - Cabeceras HTTP
-   - CSP, HSTS
+La fase 7 detecta WAF y CDN de forma **100% pasiva** mediante:
 
-4. CVEs & Scoring
-   - Correlación con NVD
-   - Clasificación CVSS
+- **Rangos IP estáticos** de Cloudflare y AWS CloudFront
+- **Rangos IP dinámicos** descargados en tiempo real desde `ip-ranges.amazonaws.com`
+- **Fingerprinting de cabeceras HTTP** (`CF-RAY`, `X-Amz-Cf-Id`, `X-Amzn-Trace-Id`...)
+- **Análisis de registros CNAME** hacia dominios de CDN conocidos
+- **Análisis de comportamiento** ante rutas inválidas (páginas de bloqueo WAF)
 
-5. Reporte
-   - Informe PDF
-   - Resumen de hallazgos
-   - Clasificación por severidad
-   - Recomendaciones
+Proveedores soportados: Cloudflare, AWS WAF, AWS CloudFront, Akamai, Fastly, Sucuri, Imperva (Incapsula), Barracuda, F5 BIG-IP, ModSecurity.
 
 ------------------------------------------------------------
 
 Output
 
-- Informe PDF generado en reports/
-- Salida estructurada en consola (análisis por fases)
-- Datos agregados del pipeline para correlación y scoring
+- **Informe PDF** generado en `reports/`
+- **Salida estructurada en consola** con progreso por fases
+- **Resumen de hallazgos** clasificados por severidad (CRITICAL / HIGH / MEDIUM / LOW / INFO)
+- **Scoring CVSS** consolidado
+- **Propuestas de mitigación** priorizadas
 
 ------------------------------------------------------------
 
 Alcance y modelo de análisis
 
-Este proyecto está orientado a un enfoque BLACKBOX basado en reconocimiento pasivo o de bajo impacto.
+Enfoque **BLACKBOX** basado en reconocimiento pasivo o de bajo impacto.
 
-Incluye:
+**Incluye:**
+- Información pública (DNS, WHOIS, certificados)
+- Consultas a fuentes abiertas (NVD, Shodan, crt.sh, ip-ranges.amazonaws.com)
+- Análisis de configuraciones accesibles públicamente
 
-- información pública (DNS, WHOIS, certificados)
-- consultas a fuentes abiertas (NVD, Shodan, crt.sh)
-- análisis de configuraciones accesibles
+**No incluye:**
+- Ejecución de exploits
+- Envío de payloads maliciosos
+- Fuerza bruta de credenciales
+- Acceso no autorizado
+- Movimiento lateral o escalada de privilegios
 
-No incluye:
-
-- ejecución de exploits
-- envío de payloads
-- fuerza bruta
-- acceso no autorizado
-- movimiento lateral
-- escalada de privilegios
-
-El comportamiento replica la fase inicial de reconocimiento de un atacante.
-
-Uso únicamente sobre activos propios o con autorización.
+> Uso únicamente sobre activos propios o con autorización explícita.
 
 ------------------------------------------------------------
 
-Limitations
+Limitaciones
 
 - Correlación de CVEs basada en fingerprinting (puede generar falsos positivos)
 - Falta de versionado preciso en muchas tecnologías detectadas
-  - Muchos hallazgos deben considerarse potenciales
-  - No implican vulnerabilidades confirmadas
-- Dependencia de APIs externas (Shodan, NVD, crt.sh)
+- Dependencia de APIs externas (Shodan, NVD, crt.sh, Leak-Lookup)
 - No valida explotación real
-- Fingerprinting heurístico
-- Posibles falsos negativos (subdominios no detectados, WAF/CDN)
+- Posibles falsos negativos en subdominios o detección WAF/CDN
 - Resultados orientativos, no definitivos
 
 ------------------------------------------------------------
@@ -366,21 +381,22 @@ Solución recomendada:
 
 Roadmap
 
-- Detección WAF/CDN
-- API discovery (endpoints, versiones, Swagger/OpenAPI, GraphQL)
-- Fingerprinting avanzado (incluyendo tipo de API)
-- Integración con nuclei
-- Mejora de correlación CVE (version-aware)
-- Correlación con MITRE ATT&CK
-- Export JSON
-- Integración SIEM
-
-Futuro:
-
-- Generación de contexto para explotación asistida
-- Exportación de contexto técnico (Metasploit / tooling)
-- Identificación de vectores potenciales
-- Generación de apuntes para fase post-recon
+- [x] OSINT & Reconocimiento
+- [x] Integración Shodan
+- [x] Integración Leak-Lookup
+- [x] Enumeración de subdominios
+- [x] Análisis SSL/TLS
+- [x] Cabeceras HTTP & CSP
+- [x] Detección WAF/CDN (Cloudflare + AWS) ← **v1.1.0**
+- [ ] Detección WAF/CDN Azure
+- [ ] API discovery (endpoints, Swagger/OpenAPI, GraphQL)
+- [ ] Fingerprinting avanzado de APIs
+- [ ] Integración con nuclei
+- [ ] Integración con JIRA para el inicio del Plan de Tratamiento
+- [ ] Mejora de correlación CVE (version-aware)
+- [ ] Correlación con MITRE ATT&CK
+- [ ] Export JSON
+- [ ] Integración SIEM
 
 ------------------------------------------------------------
 
