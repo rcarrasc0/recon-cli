@@ -35,6 +35,8 @@ El objetivo no es la explotación, sino:
 - Mapear superficie de ataque externa
 - Identificar exposición de activos
 - Analizar configuraciones públicas
+- Detectar WAF/CDN y su configuración (Cloudflare, AWS, Azure)
+- Detectar versiones de servicios expuestos (nmap -sV)
 - Priorizar riesgos mediante CVE/CVSS
 - Generar informes estructurados
 
@@ -45,7 +47,7 @@ Filosofía de diseño
 - Modularidad
 - Pipeline por fases
 - Dependencias desacopladas
-- Uso de herramientas estándar (nmap, sslyze)
+- Uso de herramientas estándar (nmap, testssl.sh)
 - Enfoque práctico orientado a pentesting real
 
 ------------------------------------------------------------
@@ -58,28 +60,25 @@ El flujo sigue un modelo en pipeline:
 Input → Reconocimiento → Enumeración → Análisis → WAF/CDN → Scoring → Reporte
 ```
 
-Cada fase es independiente pero encadenada, permitiendo:
-
-- modularidad
-- extensibilidad
-- mantenimiento sencillo
+Cada fase es independiente pero encadenada, permitiendo: modularidad, extensibilidad y mantenimiento sencillo
 
 ------------------------------------------------------------
 
 Características
 
 - **OSINT:** WHOIS, DNS, AXFR, ASN/BGP, crt.sh
-- **Integración Shodan** (opcional)
-- **Integración Leak-Lookup** (opcional)
+- **Integración Shodan** (opcional vía API key)
+- **Integración Leak-Lookup** (opcional vía API key)
 - **Enumeración de subdominios** y hosts activos HTTP/HTTPS
 - **Fingerprinting de tecnologías**
+- **Detección de versiones** con nmap -sV ← nuevo en v1.2.0
 - **Análisis SSL/TLS:** sslyze + nmap ssl-enum-ciphers
 - **Cabeceras HTTP y CSP**
 - **HSTS**
-- **Detección WAF/CDN:** Cloudflare, AWS WAF/CloudFront, Akamai, Fastly, Sucuri, Imperva
-- **Correlación con CVEs** (NVD/NIST)
+- **Detección WAF/CDN:** Cloudflare, AWS WAF/CloudFront, Azure Front Door/WAF, Akamai, Fastly, Sucuri, Imperva
+- **Correlación CVEs** (NVD/NIST) con retry automático y warning de disponibilidad
 - **Scoring por CVSS**
-- **Generación de informe PDF** estructurado
+- **Generación de informe PDF** con versión de herramienta en portada y pie
 
 ------------------------------------------------------------
 
@@ -93,11 +92,11 @@ recon-cli/
 │   ├── osint.py         WHOIS, DNS, AXFR, crt.sh, ASN
 │   ├── leaks.py         Leak-Lookup
 │   ├── shodan_scan.py   Shodan
-│   ├── enum.py          Subdominios y tecnologías
-│   ├── ssl_tls.py       SSL/TLS (sslyze + nmap)
+│   ├── enum.py          Subdominios, tecnologías y nmap -sV
+│   ├── ssl_tls.py       SSL/TLS (análisis nativo + nmap)
 │   ├── headers.py       Cabeceras HTTP, CSP, HSTS
-│   ├── waf_cdn.py       Detección WAF/CDN (Cloudflare, AWS, Akamai...)
-│   └── cves.py          CVEs (NVD/NIST)
+│   ├── waf_cdn.py       Detección WAF/CDN (Cloudflare, AWS, Azure...)
+│   └── cves.py          CVEs (NVD/NIST) con retry y warning
 ├── report/
 │   └── pdf_gen.py       Generación de informe PDF
 ├── reports/             Directorio de salida (no versionado)
@@ -141,11 +140,13 @@ chmod +x setup.sh
 ```
 
 El script:
+
+- detecta el OS
 - instala dependencias del sistema
-- crea entorno virtual
+- crea el entorno virtual Python
 - instala dependencias Python
-- valida herramientas (nmap, testssl.sh)
-- genera estructura del proyecto
+- valida herramientas
+- y empaqueta un ZIP de distribución.
 
 ------------------------------------------------------------
 
@@ -172,9 +173,10 @@ Uso
 
 El launcher `recon-exec.sh`:
 
-- activa automáticamente el entorno virtual
-- ejecuta el pipeline completo
-- carga configuración del entorno
+- valida el formato del target
+- avisa de IPs privadas
+- activa el entorno virtual
+- y ejecuta el pipeline completo.
 
 Opciones disponibles:
 
@@ -188,6 +190,9 @@ Opciones disponibles:
 | `--skip-cves` | Omitir búsqueda de CVEs |
 | `--output <ruta.pdf>` | Ruta del informe PDF de salida |
 | `--verbose / -v` | Output detallado por fase |
+
+> **Nota sobre `--scope`:** actualmente el parámetro es **informativo** — aparece en el banner del terminal y en la portada del informe PDF, pero no activa ni desactiva ningún módulo ni cambia la lógica de análisis. La diferenciación funcional entre blackbox y greybox se implementará en la próxima versión con el módulo de análisis de APIs, donde greybox habilitará el uso de credenciales y tokens.
+
 
 Ejemplos de ejecución:
 
@@ -207,18 +212,15 @@ Ejemplos de ejecución:
 # Omitir detección WAF/CDN
 ./recon-exec.sh example.com --skip-waf
 
-# Guardar informe en ruta específica
+# Omitir CVEs (útil si NVD está caído)
+./recon-exec.sh example.com --skip-cves
+
+# Ruta de salida personalizada
 ./recon-exec.sh example.com --output /tmp/informe.pdf
+
+# Sobre una IP
+./recon-exec.sh 1.2.3.4 --skip-leaks
 ```
-
-Salida esperada:
-
-- Resolución DNS
-- Enumeración
-- Análisis SSL/TLS
-- Cabeceras HTTP
-- CVEs asociados
-- Informe generado en reports/
 
 Tiempo estimado: 1–3 minutos dependiendo del target
 
@@ -231,32 +233,30 @@ Fases del análisis
 | 1 | **OSINT & Reconocimiento** | WHOIS, DNS, AXFR, crt.sh, ASN/BGP |
 | 2 | **Shodan** | Servicios expuestos, puertos, banners, CVEs indexados |
 | 3 | **Leak-Lookup** | Credenciales y emails filtrados en brechas conocidas |
-| 4 | **Enumeración & Descubrimiento** | Subdominios, hosts activos, fingerprinting de tecnologías |
+| 4 | **Enumeración & Descubrimiento** | Subdominios, hosts activos, fingerprinting, nmap -sV |
 | 5 | **Análisis SSL/TLS** | Protocolos, cifrados, certificado, HSTS, vulnerabilidades |
 | 6 | **Cabeceras HTTP & CSP** | Security headers, CSP, cookies, fugas de información |
-| 7 | **Detección WAF/CDN** | Cloudflare, AWS WAF/CloudFront, Akamai, Fastly, Sucuri, Imperva |
+| 7 | **Detección WAF/CDN** | Cloudflare, AWS WAF/CloudFront, Azure Front Door/WAF, Akamai... |
 | 8 | **CVEs** | Búsqueda en NVD/NIST por productos y versiones detectadas |
-| 9 | **Informe PDF** | Generación de informe estructurado con hallazgos y scoring CVSS |
+| 9 | **Informe PDF** | Informe estructurado con hallazgos, CVSS y mitigaciones |
 
-Detección WAF/CDN (v1.1.0)
+WAF/CDN — vectores de detección pasiva
 
-La fase 7 detecta WAF y CDN de forma **100% pasiva** mediante:
+- Rangos IP estáticos (Cloudflare, AWS CloudFront, Azure Front Door)
+- Rangos IP dinámicos en tiempo real (`ip-ranges.amazonaws.com`, ServiceTags de Microsoft)
+- Fingerprinting de cabeceras HTTP (`CF-RAY`, `X-Amz-Cf-Id`, `X-Azure-Ref`, `X-AppGw-Trace-Id`...)
+- Análisis de CNAME hacia dominios CDN (`cloudflare.net`, `cloudfront.net`, `azurefd.net`...)
+- Comportamiento ante rutas inválidas (páginas de bloqueo WAF)
 
-- **Rangos IP estáticos** de Cloudflare y AWS CloudFront
-- **Rangos IP dinámicos** descargados en tiempo real desde `ip-ranges.amazonaws.com`
-- **Fingerprinting de cabeceras HTTP** (`CF-RAY`, `X-Amz-Cf-Id`, `X-Amzn-Trace-Id`...)
-- **Análisis de registros CNAME** hacia dominios de CDN conocidos
-- **Análisis de comportamiento** ante rutas inválidas (páginas de bloqueo WAF)
-
-Proveedores soportados: Cloudflare, AWS WAF, AWS CloudFront, Akamai, Fastly, Sucuri, Imperva (Incapsula), Barracuda, F5 BIG-IP, ModSecurity.
+Proveedores: Cloudflare, AWS WAF, AWS CloudFront, Azure Front Door, Azure Application Gateway WAF, Azure CDN, Akamai, Fastly, Sucuri, Imperva, Barracuda, F5 BIG-IP, ModSecurity.
 
 ------------------------------------------------------------
 
 Output
 
-- **Informe PDF** generado en `reports/`
-- **Salida estructurada en consola** con progreso por fases
-- **Resumen de hallazgos** clasificados por severidad (CRITICAL / HIGH / MEDIUM / LOW / INFO)
+- **Informe PDF** en `reports/` con versión de herramienta en portada y pie de página
+- **Salida en consola** con progreso por fases
+- **Resumen de hallazgos** por severidad (CRITICAL / HIGH / MEDIUM / LOW / INFO)
 - **Scoring CVSS** consolidado
 - **Propuestas de mitigación** priorizadas
 
@@ -266,17 +266,9 @@ Alcance y modelo de análisis
 
 Enfoque **BLACKBOX** basado en reconocimiento pasivo o de bajo impacto.
 
-**Incluye:**
-- Información pública (DNS, WHOIS, certificados)
-- Consultas a fuentes abiertas (NVD, Shodan, crt.sh, ip-ranges.amazonaws.com)
-- Análisis de configuraciones accesibles públicamente
+**Incluye:** información pública (DNS, WHOIS, certificados), consultas a fuentes abiertas (NVD, Shodan, crt.sh), análisis de configuraciones accesibles.
 
-**No incluye:**
-- Ejecución de exploits
-- Envío de payloads maliciosos
-- Fuerza bruta de credenciales
-- Acceso no autorizado
-- Movimiento lateral o escalada de privilegios
+**No incluye:** exploits, payloads maliciosos, fuerza bruta, acceso no autorizado, movimiento lateral ni escalada de privilegios.
 
 > Uso únicamente sobre activos propios o con autorización explícita.
 
@@ -284,38 +276,37 @@ Enfoque **BLACKBOX** basado en reconocimiento pasivo o de bajo impacto.
 
 Limitaciones
 
-- Correlación de CVEs basada en fingerprinting (puede generar falsos positivos)
-- Falta de versionado preciso en muchas tecnologías detectadas
+- Correlación CVE basada en fingerprinting — puede generar falsos positivos
 - Dependencia de APIs externas (Shodan, NVD, crt.sh, Leak-Lookup)
+- NVD puede estar saturado — usar `--skip-cves` si no es prioritario
 - No valida explotación real
-- Posibles falsos negativos en subdominios o detección WAF/CDN
 - Resultados orientativos, no definitivos
 
 ------------------------------------------------------------
 
-Troubleshooting
+## Troubleshooting
 
-Pillow error (Python 3.13)
+- **Pillow error (Python 3.13)**
 
 Error:
 Failed to build Pillow
 
 Solución:
+```
 pip install "Pillow>=11.2.1"
+```
 
-------------------------------------------------------------
-
-pydantic-core / Rust error
+- **pydantic-core / Rust error**
 
 Error:
 Failed building wheel for pydantic-core
 
 Solución:
-Actualiza dependencias o usa Python 3.11
+```
+Usar Python 3.11 o: pip install pydantic==1.10.14
+```
 
-------------------------------------------------------------
-
-Dependency conflicts (ResolutionImpossible)
+- **Dependency conflicts (ResolutionImpossible)**
 
 Causa:
 Versiones fijadas incompatibles
@@ -323,17 +314,15 @@ Versiones fijadas incompatibles
 Solución:
 Eliminar versiones fijas en requirements.txt
 
-------------------------------------------------------------
-
-RequestsDependencyWarning
+- **RequestsDependencyWarning**
 
 Solución:
+```
 pip install --upgrade requests urllib3 charset_normalizer
 pip check
+```
 
-------------------------------------------------------------
-
-crt.sh timeout
+- **crt.sh timeout**
 
 Causa:
 Servicio externo inestable
@@ -341,41 +330,30 @@ Servicio externo inestable
 Solución:
 Ignorar o reintentar
 
-------------------------------------------------------------
-
-ReportLab Invalid color
+- **ReportLab Invalid color**
 
 Error:
 Invalid color value
 
 Solución:
 Cambiar:
-c.hexval()[1:]
+```c.hexval()[1:]```
 por:
-c.hexval()[2:]
+```c.hexval()[2:]```
 
-------------------------------------------------------------
-
-Python 3.13 incompatibilidades
+- **Python 3.13 incompatibilidades**
 
 Algunas librerías aún no están totalmente adaptadas.
 
 Recomendación:
 usar Python 3.11
 
-------------------------------------------------------------
+- **CVEs siempre a 0**
 
-Caso real (Python 3.13):
-
-- error en Pillow
-- error en pydantic-core (Rust)
-- conflictos pip
-
-Solución recomendada:
-
-- usar Python 3.11
-- evitar versiones fijadas
-- recrear entorno virtual
+Solución:
+```
+NVD saturado o con timeouts — reintentar más tarde o añadir NVD_API_KEY en .env
+```
 
 ------------------------------------------------------------
 
@@ -387,16 +365,29 @@ Roadmap
 - [x] Enumeración de subdominios
 - [x] Análisis SSL/TLS
 - [x] Cabeceras HTTP & CSP
-- [x] Detección WAF/CDN (Cloudflare + AWS) ← **v1.1.0**
-- [ ] Detección WAF/CDN Azure
-- [ ] API discovery (endpoints, Swagger/OpenAPI, GraphQL)
-- [ ] Fingerprinting avanzado de APIs
+- [x] Detección WAF/CDN — Cloudflare + AWS ← v1.1.0
+- [x] Detección WAF/CDN — Azure Front Door + Azure WAF ← v1.1.2
+- [x] Detección de versiones con nmap -sV ← v1.1.2
+- [x] Resiliencia NVD — timeout, retries, warning en PDF ← v1.1.2
+- [x] Versión de herramienta en informe PDF ← v1.1.2
+- [ ] API discovery greybox (endpoints, Swagger/OpenAPI, GraphQL, tokens)
+- [ ] Diferenciación funcional blackbox vs greybox
 - [ ] Integración con nuclei
-- [ ] Integración con JIRA para el inicio del Plan de Tratamiento
 - [ ] Mejora de correlación CVE (version-aware)
 - [ ] Correlación con MITRE ATT&CK
 - [ ] Export JSON
 - [ ] Integración SIEM
+
+------------------------------------------------------------
+
+## Historial de versiones
+
+| Versión | Cambios principales |
+|---|---|
+| v1.1.2 | nmap -sV, Azure WAF/CDN, resiliencia NVD, versión en PDF |
+| v1.1.0 | Módulo WAF/CDN (Cloudflare + AWS), recon-exec.sh con validación |
+| v1.0.7 | Estabilización, fix sslyze Python 3.13, fix urllib3 |
+| v1.0.0 | Release inicial |
 
 ------------------------------------------------------------
 
