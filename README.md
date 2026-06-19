@@ -71,12 +71,12 @@ Características
 - **Integración Leak-Lookup** (opcional vía API key)
 - **Enumeración de subdominios** y hosts activos HTTP/HTTPS
 - **Fingerprinting de tecnologías**
-- **Detección de versiones** con nmap -sV ← nuevo en v1.2.0
+- **Detección de versiones** con nmap -sV ← nuevo en v1.1.2
 - **Análisis SSL/TLS:** sslyze + nmap ssl-enum-ciphers
 - **Cabeceras HTTP y CSP**
 - **HSTS**
 - **Detección WAF/CDN:** Cloudflare, AWS WAF/CloudFront, Azure Front Door/WAF, Akamai, Fastly, Sucuri, Imperva
-- **Correlación CVEs** (NVD/NIST) con retry automático y warning de disponibilidad
+- **Correlación CVEs** (NVD/NIST) basada en versiones confirmadas con retry automático y warning de disponibilidad
 - **Scoring por CVSS**
 - **Generación de informe PDF** con versión de herramienta en portada y pie
 
@@ -276,7 +276,8 @@ Enfoque **BLACKBOX** basado en reconocimiento pasivo o de bajo impacto.
 
 Limitaciones
 
-- Correlación CVE basada en fingerprinting — puede generar falsos positivos
+- La correlación CVE solo se realiza cuando existe una versión suficientemente fiable de la tecnología detectada.
+- Las tecnologías sin versión confirmada se omiten de NVD para reducir falsos positivos.
 - Dependencia de APIs externas (Shodan, NVD, crt.sh, Leak-Lookup)
 - NVD puede estar saturado — usar `--skip-cves` si no es prioritario
 - No valida explotación real
@@ -366,10 +367,10 @@ Roadmap
 - [x] Análisis SSL/TLS
 - [x] Cabeceras HTTP & CSP
 - [x] Detección WAF/CDN — Cloudflare + AWS ← v1.1.0
-- [x] Detección WAF/CDN — Azure Front Door + Azure WAF ← v1.1.2
-- [x] Detección de versiones con nmap -sV ← v1.1.2
-- [x] Resiliencia NVD — timeout, retries, warning en PDF ← v1.1.2
-- [x] Versión de herramienta en informe PDF ← v1.1.2
+- [x] Detección WAF/CDN — Azure Front Door + Azure WAF
+- [x] Detección de versiones con nmap -sV
+- [x] Resiliencia NVD — timeout, retries, warning en PDF
+- [x] Versión de herramienta en informe PDF
 - [ ] API discovery greybox (endpoints, Swagger/OpenAPI, GraphQL, tokens)
 - [ ] Diferenciación funcional blackbox vs greybox
 - [ ] Integración con nuclei
@@ -384,7 +385,7 @@ Roadmap
 
 | Versión | Cambios principales |
 |---|---|
-| v1.1.2 | nmap -sV, Azure WAF/CDN, resiliencia NVD, versión en PDF |
+| v1.1.2 | nmap -sV, Azure WAF/CDN, resiliencia NVD, correlación CVE basada en versiones confirmadas |
 | v1.1.0 | Módulo WAF/CDN (Cloudflare + AWS), recon-exec.sh con validación |
 | v1.0.7 | Estabilización, fix sslyze Python 3.13, fix urllib3 |
 | v1.0.0 | Release inicial |
