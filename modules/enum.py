@@ -5,7 +5,10 @@
 #  y detección de tecnologías HTTP
 # ─────────────────────────────────────────────────────────────
 
+import re
 import socket
+import shutil
+import subprocess
 import concurrent.futures
 import httpx
 import dns.resolver
@@ -31,6 +34,8 @@ COMMON_SUBDOMAINS = [
     "intranet", "internal", "corp", "office", "extranet",
     "m", "mobile", "wap", "api2", "v1", "v2",
 ]
+
+LOW_CONFIDENCE_TECHS = {"jQuery", "Bootstrap", "React", "Vue.js", "Angular"}
 
 # Firmas de tecnologías (header/body patterns)
 TECH_SIGNATURES = {
@@ -130,6 +135,18 @@ def run_enumeration(target: str, target_info: dict, osint_data: dict, config: di
     console.print(f"[cyan]  [*][/cyan] Detectando tecnologías en {domain}...")
     results["technologies"] = _detect_technologies(domain, config)
 
+    # ── nmap -sV: detección de versiones de servicios ─────────
+    ips_to_scan = list({ip for sub in results["subdomains"] for ip in sub.get("ips", [])})
+    if target_info.get("ips"):
+        ips_to_scan = list(set(ips_to_scan + target_info["ips"]))
+    if ips_to_scan:
+        console.print(f"[cyan]  [*][/cyan] nmap -sV en {len(ips_to_scan[:3])} IP(s)...")
+        results["nmap_services"] = _run_nmap_version_scan(ips_to_scan[:3], config)
+        if results["nmap_services"]:
+            console.print(f"  [green]✓[/green] {len(results['nmap_services'])} servicio(s) con versión detectada")
+    else:
+        results["nmap_services"] = []
+
     # ── Hallazgos ─────────────────────────────────────────────
     if len(results["subdomains"]) > 20:
         results["findings"].append({
@@ -160,6 +177,62 @@ def run_enumeration(target: str, target_info: dict, osint_data: dict, config: di
 
     console.print(f"  [green]✓[/green] Enumeración completada — {len(results['findings'])} hallazgo(s)")
     return results
+
+
+
+def _run_nmap_version_scan(ips: list, config: dict) -> list:
+    """Ejecuta nmap -sV para detectar productos y versiones en puertos abiertos."""
+    if not shutil.which("nmap"):
+        console.print("  [yellow]![/yellow] nmap no encontrado — omitiendo detección de versiones")
+        return []
+
+    nmap_ports = config.get("NMAP_PORTS", "--top-ports 1000")
+    services   = []
+
+    for ip in ips:
+        try:
+            cmd = ["nmap", "-sV", "--version-intensity", "5",
+                   "-oX", "-", ip] + nmap_ports.split()
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+            import xml.etree.ElementTree as ET
+            try:
+                root = ET.fromstring(proc.stdout)
+            except ET.ParseError:
+                continue
+
+            for host in root.findall("host"):
+                for port in host.findall(".//port"):
+                    state = port.find("state")
+                    if state is None or state.get("state") != "open":
+                        continue
+                    svc = port.find("service")
+                    if svc is None:
+                        continue
+                    portid  = port.get("portid", "")
+                    proto   = port.get("protocol", "tcp")
+                    product = svc.get("product", "")
+                    version = svc.get("version", "")
+                    extra   = svc.get("extrainfo", "")
+                    name    = svc.get("name", "")
+
+                    if product or name:
+                        services.append({
+                            "ip":      ip,
+                            "port":    portid,
+                            "proto":   proto,
+                            "name":    name,
+                            "product": product,
+                            "version": version,
+                            "extra":   extra,
+                        })
+
+        except subprocess.TimeoutExpired:
+            console.print(f"  [yellow]![/yellow] nmap -sV timeout en {ip}")
+        except Exception as e:
+            console.print(f"  [yellow]![/yellow] nmap -sV error en {ip}: {e}")
+
+    return services
 
 
 def _resolve_subdomain(fqdn: str, config: dict) -> dict | None:
@@ -202,7 +275,13 @@ def _extract_title(html: str) -> str:
 
 
 def _detect_technologies(host: str, config: dict) -> dict:
-    timeout = config.get("REQUEST_TIMEOUT", 10)
+    """
+    Detecta tecnologías y extrae versión cuando es posible.
+    Cada entrada devuelta tiene:
+      - version: string con versión o "" si no detectada
+      - confidence: "HIGH" (versión confirmada) | "MEDIUM" (header sin versión) | "LOW" (solo body)
+    """
+    timeout  = config.get("REQUEST_TIMEOUT", 10)
     detected = {}
 
     for scheme in ["https", "http"]:
@@ -213,34 +292,81 @@ def _detect_technologies(host: str, config: dict) -> dict:
 
             headers_lower = {k.lower(): v.lower() for k, v in resp.headers.items()}
             body_lower    = resp.text.lower()
+            body_original = resp.text
 
             for tech, sigs in TECH_SIGNATURES.items():
-                matched = False
-                version = ""
+                matched    = False
+                version    = ""
+                confidence = "LOW"
 
+                # ── Detección por cabeceras ────────────────────
                 if "headers" in sigs:
                     for h_key, h_val in sigs["headers"].items():
                         h_key_l = h_key.lower()
                         if h_key_l in headers_lower:
                             if not h_val or h_val.lower() in headers_lower[h_key_l]:
-                                matched = True
-                                # Intentar extraer versión
+                                matched    = True
+                                confidence = "MEDIUM"
+                                # Extraer versión de cabecera (ej: "nginx/1.24.0")
                                 raw_val = resp.headers.get(h_key, "")
                                 if "/" in raw_val:
-                                    version = raw_val.split("/")[-1].split(" ")[0]
+                                    candidate = raw_val.split("/")[-1].split(" ")[0].strip()
+                                    if candidate and candidate[0].isdigit():
+                                        version    = candidate
+                                        confidence = "HIGH"
 
+                # ── Detección por body ─────────────────────────
                 if "body" in sigs and sigs["body"].lower() in body_lower:
                     matched = True
+                    if not version:
+                        # Intentar extraer versión de URLs en el HTML
+                        # Ej: jquery-3.7.1.min.js, bootstrap.min.css?ver=5.3.2
+                        version = _extract_version_from_html(tech, body_original)
+                        if version:
+                            confidence = "HIGH"
+                        # Si no hay versión, confianza baja
+                        elif tech in LOW_CONFIDENCE_TECHS:
+                            confidence = "LOW"
 
                 if matched:
-                    detected[tech] = version or "detectado"
+                    # Guardamos como dict con versión y confianza
+                    detected[tech] = {
+                        "version":    version,
+                        "confidence": confidence,
+                    }
 
-            console.print(f"  [green]✓[/green] Tecnologías detectadas: {', '.join(detected.keys()) or 'ninguna identificada'}")
+            # Resumen en consola
+            high = [f"{t} {v['version']}" for t, v in detected.items() if v["confidence"] == "HIGH"]
+            med  = [t for t, v in detected.items() if v["confidence"] == "MEDIUM"]
+            low  = [t for t, v in detected.items() if v["confidence"] == "LOW"]
+            parts = []
+            if high: parts.append(f"[green]HIGH:[/green] {', '.join(high)}")
+            if med:  parts.append(f"[yellow]MEDIUM:[/yellow] {', '.join(med)}")
+            if low:  parts.append(f"[dim]LOW:[/dim] {', '.join(low)}")
+            console.print(f"  [green]✓[/green] Tecnologías: {' | '.join(parts) or 'ninguna identificada'}")
             break
+
         except Exception:
             continue
 
     return detected
+
+
+def _extract_version_from_html(tech: str, html: str) -> str:
+    """Extrae version de una tecnologia buscando patrones en URLs del HTML."""
+    tech_key = tech.lower().replace(".js", "")
+    p1 = re.compile(tech_key + r"[-/](\d+(?:[.]\d+)+)", re.IGNORECASE)
+    p2 = re.compile(r"[?&]v(?:er)?=(\d+(?:[.]\d+)+)", re.IGNORECASE)
+    dv = r'data-version'
+    p3 = re.compile(dv + r'=["\']?(\d+(?:[.]\d+)+)["\']?', re.IGNORECASE)
+    for pat in (p1, p2, p3):
+        m = pat.search(html)
+        if m:
+            candidate = m.group(1).rstrip(".")
+            parts = candidate.split(".")
+            if len(parts) >= 2 and all(p.isdigit() and len(p) <= 4 for p in parts):
+                return candidate
+    return ""
 
 
 def _print_subdomains_table(subdomains: list):

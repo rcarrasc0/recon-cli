@@ -21,6 +21,8 @@ from reportlab.platypus.flowables import Flowable
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import HexColor
 
+RECON_CLI_VERSION = "v1.2.0"
+
 # ── Paleta de colores ─────────────────────────────────────────
 C_PRIMARY    = HexColor("#0D1117")   # Negro profundo
 C_ACCENT     = HexColor("#00D4AA")   # Verde ciberseguridad
@@ -313,6 +315,7 @@ def _build_cover(results, config, styles, w):
         ["Fecha de análisis", start_time.strftime("%d/%m/%Y %H:%M:%S UTC")],
         ["Autor del informe", author],
         ["Clasificación", "CONFIDENCIAL"],
+        ["Versión herramienta", RECON_CLI_VERSION],
     ]
     meta_style = ParagraphStyle("meta_k", fontName="Helvetica", fontSize=10, textColor=HexColor("#8B949E"))
     meta_val_s = ParagraphStyle("meta_v", fontName="Helvetica-Bold", fontSize=10, textColor=colors.white)
@@ -349,7 +352,7 @@ def _build_cover(results, config, styles, w):
 
     stat_data = [[
         Paragraph(
-            f"<b><font size='20' color='#{c.hexval()[2:]}'>{counts[sev]}</font></b><br/>"
+            f"<b><font size='20' color='#{c.hexval()[1:]}'>{counts[sev]}</font></b><br/>"
             f"<font size='8' color='#8B949E'>{sev}</font>",
             ParagraphStyle("stat", fontName="Helvetica", alignment=TA_CENTER)
         )
@@ -457,6 +460,35 @@ def _build_executive_summary(results, styles, w):
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(t)
+
+    # ── Warning NVD si hubo errores ───────────────────────────
+    nvd_status = results.get("config_snapshot", {}).get("nvd_status") or ""
+    # Buscamos en config pasado a través de results
+    if not nvd_status:
+        # fallback: mirar si hay 0 CVEs pero sí había productos
+        if not results.get("cves") and results.get("enumeration", {}).get("technologies"):
+            nvd_status = "possible_failure"
+
+    if nvd_status in ("partial", "possible_failure"):
+        story.append(Spacer(1, 0.4 * cm))
+        warning_data = [[Paragraph(
+            "⚠ <b>AVISO:</b> La correlación de CVEs no pudo completarse correctamente debido a "
+            "errores o timeouts en la API de NVD/NIST. Los resultados de vulnerabilidades pueden "
+            "estar <b>INCOMPLETOS</b>. Se recomienda repetir el análisis o consultar NVD manualmente "
+            "para los productos detectados.",
+            ParagraphStyle("nvd_warn", fontName="Helvetica", fontSize=9,
+                           textColor=SEV_COLORS["HIGH"], leading=14)
+        )]]
+        warn_table = Table(warning_data, colWidths=[w])
+        warn_table.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,-1), HexColor("#FFF8F0")),
+            ("LINEABOVE",     (0,0),(-1,0),  2, SEV_COLORS["HIGH"]),
+            ("LINEBELOW",     (0,-1),(-1,-1),2, SEV_COLORS["HIGH"]),
+            ("TOPPADDING",    (0,0),(-1,-1), 10),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 10),
+            ("LEFTPADDING",   (0,0),(-1,-1), 12),
+        ]))
+        story.append(warn_table)
 
     return story
 
@@ -703,8 +735,8 @@ def _build_ssl_section(results, styles, w):
             status_color = SEV_COLORS["CRITICAL"] if enabled and proto in ("SSLv2","SSLv3","TLSv1","TLSv1.1") else (HexColor("#1A7F37") if enabled else C_MUTED)
             proto_data.append([
                 Paragraph(proto, styles["body"]),
-                Paragraph(f"<font color='#{status_color.hexval()[2:]}'>{status}</font>", styles["body"]),
-                Paragraph(f"<font color='#{color.hexval()[2:]}'>{label}</font>", styles["body"]),
+                Paragraph(f"<font color='#{status_color.hexval()[1:]}'>{status}</font>", styles["body"]),
+                Paragraph(f"<font color='#{color.hexval()[1:]}'>{label}</font>", styles["body"]),
             ])
 
         t2 = Table(proto_data, colWidths=[w * 0.25, w * 0.35, w * 0.4])
@@ -823,51 +855,7 @@ def _build_headers_section(results, styles, w):
 
 
 # ── OSINT ─────────────────────────────────────────────────────
-def _build_osint_section(results, styles, w):
-    story = []
-    osint = results.get("osint", {})
-    enum  = results.get("enumeration", {})
-
-    story.append(Paragraph("6. OSINT & Reconocimiento", styles["h1"]))
-    story.append(ColorLine(w, C_ACCENT, 2))
-    story.append(Spacer(1, 0.3 * cm))
-
-    # WHOIS
-    whois_data = osint.get("whois", {})
-    if whois_data:
-        story.append(Paragraph("6.1 WHOIS", styles["h2"]))
-        whois_rows = [
-            ["Registrador",     whois_data.get("registrar", "N/A")],
-            ["Organización",    whois_data.get("org", "N/A")],
-            ["País",            whois_data.get("country", "N/A")],
-            ["Creación",        str(whois_data.get("creation_date", "N/A"))[:30]],
-            ["Expiración",      str(whois_data.get("expiration_date", "N/A"))[:30]],
-            ["Name Servers",    ", ".join(whois_data.get("name_servers", []))[:80]],
-            ["Emails WHOIS",    ", ".join(whois_data.get("emails", []))[:80] or "N/A"],
-        ]
-        t = Table(whois_rows, colWidths=[w * 0.25, w * 0.75])
-        t.setStyle(TableStyle([
-            ("FONTNAME",      (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTSIZE",      (0, 0), (-1,-1), 8),
-            ("ROWBACKGROUNDS",(0, 0), (-1, -1), [C_BG_LIGHT, colors.white]),
-            ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
-        ]))
-        story.append(t)
-
-    # DNS
-    dns_records = osint.get("dns_records", {})
-    if dns_records:
-        story.append(Paragraph("6.2 Registros DNS", styles["h2"]))
-
-    # Subdominios
-    subdomains = enum.get("subdomains", [])
-    if subdomains:
-        story.append(Paragraph("6.3 Subdominios", styles["h2"]))
-
-    return story
-
-
-
+def _build_waf_section(results, styles, w):
     story = []
     waf   = results.get("waf_cdn", {})
 
@@ -966,7 +954,7 @@ def _build_osint_section(results, styles, w):
     return story
 
 
-
+def _build_osint_section(results, styles, w):
     story = []
     osint = results.get("osint", {})
     enum  = results.get("enumeration", {})
@@ -1056,46 +1044,6 @@ def _build_osint_section(results, styles, w):
     return story
 
 
-# ── WAF/CDN ───────────────────────────────────────────────────
-def _build_waf_section(results, styles, w):
-    story = []
-    waf   = results.get("waf_cdn", {})
-
-    story.append(Paragraph("7. Detección WAF/CDN", styles["h1"]))
-    story.append(ColorLine(w, C_ACCENT, 2))
-    story.append(Spacer(1, 0.3 * cm))
-
-    detected = waf.get("detected", [])
-
-    if not detected:
-        story.append(Paragraph(
-            "No se detectó ningún WAF o CDN conocido delante del servidor de origen.",
-            styles["body"]
-        ))
-    else:
-        providers_str = ", ".join(d["provider"] for d in detected)
-        story.append(Paragraph(
-            f"Se ha identificado la presencia de <b>{providers_str}</b> "
-            f"intermediando el tráfico hacia el servidor de origen.",
-            styles["body"]
-        ))
-
-    # Subbloques numerados correctos
-    ip_prov = waf.get("ip_provider", {})
-    if ip_prov.get("provider"):
-        story.append(Paragraph("7.1 Rango IP", styles["h2"]))
-
-    dns = waf.get("dns_hints", {})
-    if dns.get("cname_provider"):
-        story.append(Paragraph("7.2 CNAME hacia CDN", styles["h2"]))
-
-    block = waf.get("block_test", {})
-    if block.get("waf_detected"):
-        story.append(Paragraph("7.3 Comportamiento de bloqueo WAF", styles["h2"]))
-
-    return story
-
-
 # ── CVEs ──────────────────────────────────────────────────────
 def _build_cves_section(results, styles, w):
     story = []
@@ -1128,7 +1076,7 @@ def _build_cves_section(results, styles, w):
             Paragraph(cve.get("id", ""), styles["body_small"]),
             Paragraph(cve.get("product", "")[:20], styles["body_small"]),
             Paragraph(str(score), styles["body_small"]),
-            Paragraph(f"<font color='#{c.hexval()[2:]}'>{sev}</font>", styles["body_small"]),
+            Paragraph(f"<font color='#{c.hexval()[1:]}'>{sev}</font>", styles["body_small"]),
             Paragraph(cve.get("published", ""), styles["body_small"]),
         ])
 
@@ -1154,7 +1102,7 @@ def _build_cves_section(results, styles, w):
             story.append(KeepTogether([
                 Paragraph(
                     f"<b>{cve.get('id')}</b> — CVSS {cve.get('cvss_score')} "
-                    f"(<font color='#{SEV_COLORS[sev].hexval()[2:]}'>{sev}</font>)",
+                    f"(<font color='#{SEV_COLORS[sev].hexval()[1:]}'>{sev}</font>)",
                     styles["h3"]
                 ),
                 Paragraph(cve.get("description", "")[:400], styles["body_small"]),
@@ -1198,7 +1146,7 @@ def _build_cvss_table(results, styles, w):
             Paragraph(f.get("title", "")[:60], styles["body_small"]),
             Paragraph(f.get("phase", ""), styles["body_small"]),
             Paragraph(str(f.get("cvss", 0.0)), styles["body_small"]),
-            Paragraph(f"<font color='#{c.hexval()[2:]}'>{sev}</font>", styles["body_small"]),
+            Paragraph(f"<font color='#{c.hexval()[1:]}'>{sev}</font>", styles["body_small"]),
         ])
 
     t = Table(rows, colWidths=[w*0.05, w*0.47, w*0.16, w*0.1, w*0.17])
@@ -1264,7 +1212,7 @@ def _build_mitigations_section(results, styles, w):
 
         rows.append([
             Paragraph(
-                f"<font color='#{color.hexval()[2:]}'><b>{prio_label}</b></font>",
+                f"<font color='#{color.hexval()[1:]}'><b>{prio_label}</b></font>",
                 styles["body_small"]
             ),
             Paragraph(f.get("title", "")[:50], styles["body_small"]),
@@ -1290,11 +1238,10 @@ def _build_mitigations_section(results, styles, w):
     story.append(ColorLine(w, C_BORDER, 0.5))
     story.append(Spacer(1, 0.3 * cm))
     story.append(Paragraph(
-        f"<i>Informe generado por recon-cli el "
+        f"<i>Informe generado por recon-cli {RECON_CLI_VERSION} el "
         f"{results['start_time'].strftime('%d/%m/%Y a las %H:%M:%S')}. "
         f"Este documento es confidencial y está destinado exclusivamente al equipo de seguridad autorizado.</i>",
         styles["body_small"]
     ))
 
     return story
-    

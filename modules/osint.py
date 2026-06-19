@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────
-#  recon-cli · modules/osint.py
+#  recon-cli · modules/osint.py  v1.2.0
 #  WHOIS, DNS (A/AAAA/MX/TXT/NS/SOA), AXFR, crt.sh, ASN/BGP
+#  Fix: emails WHOIS siempre tratados como lista
 # ─────────────────────────────────────────────────────────────
 
 import requests
@@ -36,29 +37,40 @@ def run_osint(target: str, target_info: dict, config: dict) -> dict:
     console.print("[cyan]  [*][/cyan] WHOIS...")
     try:
         w = whois.whois(target)
+
+        # Fix crítico: w.emails puede ser str, list o None
+        # Si es str, envolverlo en lista; si es None, lista vacía
+        raw_emails = w.emails or []
+        if isinstance(raw_emails, str):
+            raw_emails = [raw_emails]
+        # Deduplicar y filtrar vacíos
+        emails = list({e.strip() for e in raw_emails if e and "@" in str(e)})
+
         results["whois"] = {
-            "registrar":      str(w.registrar or "N/A"),
-            "creation_date":  str(w.creation_date or "N/A"),
+            "registrar":       str(w.registrar or "N/A"),
+            "creation_date":   str(w.creation_date or "N/A"),
             "expiration_date": str(w.expiration_date or "N/A"),
-            "name_servers":   w.name_servers or [],
-            "emails":         w.emails or [],
-            "org":            str(w.org or "N/A"),
-            "country":        str(w.country or "N/A"),
-            "raw":            str(w.text or ""),
+            "name_servers":    w.name_servers or [],
+            "emails":          emails,
+            "org":             str(w.org or "N/A"),
+            "country":         str(w.country or "N/A"),
+            "raw":             str(w.text or ""),
         }
         console.print(f"  [green]✓[/green] Registrar: {results['whois']['registrar']}")
 
-        # Hallazgo: emails expuestos en WHOIS
-        if results["whois"]["emails"]:
-            for email in results["whois"]["emails"]:
-                results["findings"].append({
-                    "phase": "OSINT",
-                    "title": "Email expuesto en WHOIS",
-                    "description": f"Email {email} visible en registros WHOIS públicos.",
-                    "severity": "INFO",
-                    "cvss": 0.0,
-                    "remediation": "Considerar privacidad WHOIS (WHOIS privacy protection) con el registrador.",
-                })
+        # Un único hallazgo consolidado si hay emails expuestos
+        if emails:
+            emails_str = ", ".join(emails[:5])
+            if len(emails) > 5:
+                emails_str += f" (+{len(emails)-5} más)"
+            results["findings"].append({
+                "phase":       "OSINT",
+                "title":       f"Email(s) expuesto(s) en WHOIS ({len(emails)})",
+                "description": f"Los siguientes emails son visibles en registros WHOIS públicos: {emails_str}",
+                "severity":    "INFO",
+                "cvss":        0.0,
+                "remediation": "Considerar privacidad WHOIS (WHOIS privacy protection) con el registrador.",
+            })
     except Exception as e:
         console.print(f"  [yellow]![/yellow] WHOIS falló: {e}")
 
@@ -80,57 +92,55 @@ def run_osint(target: str, target_info: dict, config: dict) -> dict:
             except Exception:
                 pass
 
-        # Hallazgo: SPF / DMARC / DKIM ausentes
+        # SPF / DMARC ausentes
         txt_records = " ".join(results["dns_records"].get("TXT", []))
         if "v=spf1" not in txt_records:
             results["findings"].append({
-                "phase": "OSINT",
-                "title": "SPF no configurado",
-                "description": "No se encontró registro SPF en los TXT del dominio. Permite spoofing de email.",
-                "severity": "MEDIUM",
-                "cvss": 5.3,
+                "phase":       "OSINT",
+                "title":       "SPF no configurado",
+                "description": "No se encontró registro SPF. Permite spoofing de email.",
+                "severity":    "MEDIUM",
+                "cvss":        5.3,
                 "remediation": "Añadir registro TXT SPF: v=spf1 include:... -all",
             })
         if "v=DMARC1" not in txt_records:
             results["findings"].append({
-                "phase": "OSINT",
-                "title": "DMARC no configurado",
-                "description": "No se encontró registro _dmarc. Sin política DMARC el dominio es vulnerable a email spoofing.",
-                "severity": "MEDIUM",
-                "cvss": 5.3,
-                "remediation": "Añadir registro TXT en _dmarc.<dominio>: v=DMARC1; p=reject; rua=mailto:...",
+                "phase":       "OSINT",
+                "title":       "DMARC no configurado",
+                "description": "No se encontró registro _dmarc. Dominio vulnerable a email spoofing.",
+                "severity":    "MEDIUM",
+                "cvss":        5.3,
+                "remediation": "Añadir: _dmarc.<dominio> TXT v=DMARC1; p=reject; rua=mailto:...",
             })
 
         # ── AXFR ──────────────────────────────────────────────
         console.print("[cyan]  [*][/cyan] Intentando transferencia de zona (AXFR)...")
-        ns_list = results["dns_records"].get("NS", [])
+        ns_list      = results["dns_records"].get("NS", [])
         axfr_results = {}
 
         for ns in ns_list:
             ns = ns.rstrip(".")
             try:
-                zone = dns.zone.from_xfr(dns.query.xfr(ns, target, timeout=timeout))
+                zone    = dns.zone.from_xfr(dns.query.xfr(ns, target, timeout=timeout))
                 records = []
                 for name, node in zone.nodes.items():
-                    rdatasets = node.rdatasets
-                    for rdataset in rdatasets:
+                    for rdataset in node.rdatasets:
                         for rdata in rdataset:
                             records.append(f"{name} {dns.rdatatype.to_text(rdataset.rdtype)} {rdata}")
                 axfr_results[ns] = records
                 console.print(f"  [bold red]⚠ AXFR exitoso en {ns}! {len(records)} registros expuestos[/bold red]")
                 results["findings"].append({
-                    "phase": "OSINT",
-                    "title": f"Transferencia de zona AXFR permitida en {ns}",
-                    "description": f"El servidor DNS {ns} permite transferencias de zona. {len(records)} registros expuestos.",
-                    "severity": "HIGH",
-                    "cvss": 7.5,
-                    "remediation": "Restringir AXFR solo a servidores DNS secundarios autorizados (ACL en BIND/etc).",
+                    "phase":       "OSINT",
+                    "title":       f"Transferencia de zona AXFR permitida en {ns}",
+                    "description": f"El servidor DNS {ns} permite AXFR. {len(records)} registros expuestos.",
+                    "severity":    "HIGH",
+                    "cvss":        7.5,
+                    "remediation": "Restringir AXFR solo a servidores DNS secundarios autorizados.",
                 })
             except Exception:
                 axfr_results[ns] = []
 
         results["axfr"] = axfr_results
-
         if not any(axfr_results.values()):
             console.print("  [green]✓[/green] AXFR denegado en todos los NS (correcto)")
 
@@ -144,7 +154,7 @@ def run_osint(target: str, target_info: dict, config: dict) -> dict:
             )
             if resp.status_code == 200:
                 certs = resp.json()
-                seen = set()
+                seen  = set()
                 for cert in certs:
                     name = cert.get("name_value", "").lower().strip()
                     for sub in name.split("\n"):
@@ -152,24 +162,24 @@ def run_osint(target: str, target_info: dict, config: dict) -> dict:
                         if sub and sub not in seen:
                             seen.add(sub)
                             results["certificates"].append({
-                                "name": sub,
-                                "issuer": cert.get("issuer_name", "N/A"),
+                                "name":       sub,
+                                "issuer":     cert.get("issuer_name", "N/A"),
                                 "not_before": cert.get("not_before", ""),
-                                "not_after": cert.get("not_after", ""),
-                                "id": cert.get("id", ""),
+                                "not_after":  cert.get("not_after", ""),
+                                "id":         cert.get("id", ""),
                             })
-                console.print(f"  [green]✓[/green] {len(seen)} nombres únicos encontrados en crt.sh")
+                console.print(f"  [green]✓[/green] {len(seen)} nombres únicos en crt.sh")
         except Exception as e:
             console.print(f"  [yellow]![/yellow] crt.sh falló: {e}")
 
-    # ── ASN / BGP / rDNS ──────────────────────────────────────
+    # ── ASN / BGP ─────────────────────────────────────────────
     console.print("[cyan]  [*][/cyan] Consulta ASN/BGP...")
     ips_to_check = target_info.get("ips", [])
     if target_info["type"] == "ip":
         ips_to_check = [target_info["value"]]
 
     asn_data = {}
-    for ip in ips_to_check[:3]:  # máximo 3 IPs
+    for ip in ips_to_check[:3]:
         try:
             obj = IPWhois(ip)
             res = obj.lookup_rdap(depth=1)
@@ -180,13 +190,12 @@ def run_osint(target: str, target_info: dict, config: dict) -> dict:
                 "asn_desc":     res.get("asn_description", "N/A"),
                 "network_name": res.get("network", {}).get("name", "N/A"),
             }
-            console.print(f"  [green]✓[/green] {ip} → ASN{res.get('asn')} ({res.get('asn_description', 'N/A')})")
+            console.print(f"  [green]✓[/green] {ip} → ASN{res.get('asn')} ({res.get('asn_description','N/A')})")
         except Exception as e:
             console.print(f"  [yellow]![/yellow] ASN lookup falló para {ip}: {e}")
 
     results["asn"] = asn_data
 
-    # ── Mostrar tabla resumen DNS ─────────────────────────────
     if results["dns_records"] and config.get("verbose"):
         _print_dns_table(target, results["dns_records"])
 

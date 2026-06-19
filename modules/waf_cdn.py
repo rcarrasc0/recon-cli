@@ -37,6 +37,19 @@ AWS_CLOUDFRONT_IPV4 = [
     "204.246.168.0/22","205.251.192.0/19","216.137.32.0/19",
 ]
 
+# Azure Front Door / CDN IPs (estáticos más comunes)
+# Rangos dinámicos en: https://www.microsoft.com/en-us/download/details.aspx?id=56519
+AZURE_FRONTDOOR_IPV4 = [
+    "13.107.42.0/24", "13.107.43.0/24",
+    "13.107.64.0/18", "13.107.128.0/22",
+    "20.135.0.0/22",  "20.150.0.0/15",
+    "20.190.0.0/16",  "40.82.0.0/22",
+    "40.90.0.0/15",   "40.126.0.0/18",
+    "51.105.0.0/19",  "52.108.0.0/14",
+    "52.112.0.0/14",  "52.238.0.0/18",
+    "104.146.0.0/15", "104.208.0.0/13",
+]
+
 # ── Firmas de cabeceras por proveedor ─────────────────────────
 WAF_CDN_SIGNATURES = {
     "Cloudflare": {
@@ -81,6 +94,24 @@ WAF_CDN_SIGNATURES = {
         "confidence":      "HIGH",
         "type":            "WAF",
     },
+    "Azure Front Door": {
+        "headers_present": ["x-azure-ref", "x-fd-healthprobe", "x-msedge-ref"],
+        "headers_value":   {"server": "ecs", "x-cache": ""},
+        "confidence":      "HIGH",
+        "type":            "CDN+WAF",
+    },
+    "Azure Application Gateway WAF": {
+        "headers_present": ["x-appgw-trace-id"],
+        "headers_value":   {},
+        "confidence":      "HIGH",
+        "type":            "WAF",
+    },
+    "Azure CDN": {
+        "headers_present": ["x-ec-custom-error", "x-check-cacheable"],
+        "headers_value":   {"x-cache": "tcp_hit"},
+        "confidence":      "MEDIUM",
+        "type":            "CDN",
+    },
     "Cloudflare WAF Block": {
         "headers_present": ["cf-ray"],
         "status_codes":    [403, 429, 503],
@@ -99,6 +130,7 @@ WAF_BLOCK_PATTERNS = {
     "Akamai":              ["akamai reference", "access denied. you don't have permission"],
     "Barracuda":           ["barracuda web application firewall"],
     "F5 BIG-IP":           ["the requested url was rejected", "f5 networks"],
+    "Azure WAF":            ["azure web application firewall", "microsoft-azure-application-gateway"],
     "ModSecurity":         ["mod_security", "not acceptable"],
 }
 
@@ -187,6 +219,19 @@ def run_waf_cdn(target: str, target_info: dict, config: dict) -> dict:
                 "matched_by": [f"AWS ip-ranges.json: {aws_result.get('range')}"],
             })
 
+    # ── 4b. Rangos Azure dinámicos ────────────────────────────
+    console.print("[cyan]  [*][/cyan] Consultando rangos IP dinámicos de Azure...")
+    azure_result = _check_azure_dynamic(target_info, timeout)
+    if azure_result.get("matched"):
+        console.print(f"  [red]⚑[/red] IP confirmada en rango Azure: {azure_result.get('range')}")
+        if "Azure Front Door" not in [d["provider"] for d in results["detected"]]:
+            results["detected"].append({
+                "provider":   "Azure Front Door",
+                "type":       "CDN+WAF",
+                "confidence": "HIGH",
+                "matched_by": [f"Azure ServiceTags: {azure_result.get('range')}"],
+            })
+
     # ── 5. Test de respuesta a ruta inválida (WAF behavior) ──
     console.print("[cyan]  [*][/cyan] Comprobando comportamiento ante ruta inválida...")
     block_test = _test_waf_block_behavior(host, timeout)
@@ -268,6 +313,9 @@ def _check_ip_ranges(target_info: dict) -> dict:
             for cidr in AWS_CLOUDFRONT_IPV4:
                 if ip in ipaddress.ip_network(cidr, strict=False):
                     return {"provider": "AWS CloudFront", "matched_ip": ip_str, "matched_range": cidr}
+            for cidr in AZURE_FRONTDOOR_IPV4:
+                if ip in ipaddress.ip_network(cidr, strict=False):
+                    return {"provider": "Azure Front Door", "matched_ip": ip_str, "matched_range": cidr}
         except Exception:
             continue
     return result
@@ -283,6 +331,7 @@ def _check_dns_hints(host: str, config: dict) -> dict:
         "Akamai":        ["akamaiedge.net", "akamaized.net", "edgekey.net", "edgesuite.net"],
         "Fastly":        ["fastly.net", "fastlylb.net"],
         "Sucuri":        ["sucuri.net"],
+        "Azure Front Door": ["azurefd.net", "azureedge.net", "trafficmanager.net"],
     }
 
     try:
@@ -419,6 +468,56 @@ def _test_waf_block_behavior(host: str, timeout: int) -> dict:
                 result["waf_detected"] = True
                 result["provider"]     = "WAF genérico"
                 return result
+
+        except Exception:
+            continue
+
+    return result
+
+
+def _check_azure_dynamic(target_info: dict, timeout: int) -> dict:
+    """Descarga ServiceTags de Azure y comprueba si la IP pertenece a AzureFrontDoor."""
+    result = {"matched": False, "range": None}
+    ips = target_info.get("ips", [])
+    if not ips:
+        return result
+
+    # URL del JSON de ServiceTags de Azure (pública, sin auth)
+    # Nota: la URL exacta cambia con cada release — usamos el endpoint de discovery
+    service_tags_urls = [
+        "https://raw.githubusercontent.com/tobilg/microsoft-azure-ip-ranges/main/data/ServiceTags_Public.json",
+        "https://download.microsoft.com/download/7/1/D/71D86715-5596-4529-9B13-DA13A5DE5B63/ServiceTags_Public_20240115.json",
+    ]
+
+    for url in service_tags_urls:
+        try:
+            resp = requests.get(url, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+
+            data = resp.json()
+            values = data.get("values", [])
+
+            # Buscar rangos de AzureFrontDoor y AzureCDN
+            azure_ranges = []
+            for entry in values:
+                name = entry.get("name", "")
+                if any(k in name for k in ("AzureFrontDoor", "AzureCDN", "FrontDoor")):
+                    for prefix in entry.get("properties", {}).get("addressPrefixes", []):
+                        if "." in prefix:  # solo IPv4
+                            azure_ranges.append(prefix)
+
+            for ip_str in ips:
+                try:
+                    ip = ipaddress.ip_address(ip_str)
+                    for cidr in azure_ranges:
+                        if ip in ipaddress.ip_network(cidr, strict=False):
+                            result["matched"] = True
+                            result["range"]   = cidr
+                            return result
+                except Exception:
+                    continue
+            break  # Si descargó bien, no probar la siguiente URL
 
         except Exception:
             continue

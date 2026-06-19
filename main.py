@@ -146,6 +146,12 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
     else:
         _skip_phase("8", "CVEs", True, False)
 
+    # ── Propagar estado NVD al results para el PDF ───────────
+    results["config_snapshot"] = {
+        "nvd_status": config.get("nvd_status", ""),
+        "nvd_errors": config.get("nvd_errors", []),
+    }
+
     # ── Consolidar hallazgos ──────────────────────────────────
     results["findings"] = _consolidate_findings(results)
     results["end_time"] = datetime.now()
