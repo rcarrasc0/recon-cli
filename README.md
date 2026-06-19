@@ -88,6 +88,7 @@ Estructura del proyecto
 recon-cli/
 ├── main.py              Entry point CLI
 ├── config.py            Carga de entorno y configuración
+├── version.py           Fuente única de verdad para el versionado
 ├── modules/
 │   ├── osint.py         WHOIS, DNS, AXFR, crt.sh, ASN
 │   ├── leaks.py         Leak-Lookup
@@ -108,6 +109,20 @@ recon-cli/
 Los scripts `setup.sh` y `recon-exec.sh` automatizan completamente la instalación y ejecución, reduciendo la interacción manual del usuario.
 
 Cada módulo es independiente y puede ampliarse sin afectar al pipeline.
+
+
+### Gestión de versiones
+
+La versión de recon-cli se define en un único fichero (`version.py`).
+
+Esta información es utilizada automáticamente por:
+
+- Banner de terminal
+- Portada del informe PDF
+- Pie de página del informe PDF
+- Componentes internos de la aplicación
+
+Este enfoque evita inconsistencias entre versiones, elimina valores hardcodeados y simplifica el mantenimiento de futuras releases.
 
 ------------------------------------------------------------
 
