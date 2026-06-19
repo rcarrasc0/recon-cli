@@ -352,7 +352,7 @@ def _build_cover(results, config, styles, w):
 
     stat_data = [[
         Paragraph(
-            f"<b><font size='20' color='#{c.hexval()[1:]}'>{counts[sev]}</font></b><br/>"
+            f"<b><font size='20' color='#{c.hexval()[2:]}'>{counts[sev]}</font></b><br/>"
             f"<font size='8' color='#8B949E'>{sev}</font>",
             ParagraphStyle("stat", fontName="Helvetica", alignment=TA_CENTER)
         )
@@ -735,8 +735,8 @@ def _build_ssl_section(results, styles, w):
             status_color = SEV_COLORS["CRITICAL"] if enabled and proto in ("SSLv2","SSLv3","TLSv1","TLSv1.1") else (HexColor("#1A7F37") if enabled else C_MUTED)
             proto_data.append([
                 Paragraph(proto, styles["body"]),
-                Paragraph(f"<font color='#{status_color.hexval()[1:]}'>{status}</font>", styles["body"]),
-                Paragraph(f"<font color='#{color.hexval()[1:]}'>{label}</font>", styles["body"]),
+                Paragraph(f"<font color='#{status_color.hexval()[2:]}'>{status}</font>", styles["body"]),
+                Paragraph(f"<font color='#{color.hexval()[2:]}'>{label}</font>", styles["body"]),
             ])
 
         t2 = Table(proto_data, colWidths=[w * 0.25, w * 0.35, w * 0.4])
@@ -1076,7 +1076,7 @@ def _build_cves_section(results, styles, w):
             Paragraph(cve.get("id", ""), styles["body_small"]),
             Paragraph(cve.get("product", "")[:20], styles["body_small"]),
             Paragraph(str(score), styles["body_small"]),
-            Paragraph(f"<font color='#{c.hexval()[1:]}'>{sev}</font>", styles["body_small"]),
+            Paragraph(f"<font color='#{c.hexval()[2:]}'>{sev}</font>", styles["body_small"]),
             Paragraph(cve.get("published", ""), styles["body_small"]),
         ])
 
@@ -1102,7 +1102,7 @@ def _build_cves_section(results, styles, w):
             story.append(KeepTogether([
                 Paragraph(
                     f"<b>{cve.get('id')}</b> — CVSS {cve.get('cvss_score')} "
-                    f"(<font color='#{SEV_COLORS[sev].hexval()[1:]}'>{sev}</font>)",
+                    f"(<font color='#{SEV_COLORS[sev].hexval()[2:]}'>{sev}</font>)",
                     styles["h3"]
                 ),
                 Paragraph(cve.get("description", "")[:400], styles["body_small"]),
@@ -1146,7 +1146,7 @@ def _build_cvss_table(results, styles, w):
             Paragraph(f.get("title", "")[:60], styles["body_small"]),
             Paragraph(f.get("phase", ""), styles["body_small"]),
             Paragraph(str(f.get("cvss", 0.0)), styles["body_small"]),
-            Paragraph(f"<font color='#{c.hexval()[1:]}'>{sev}</font>", styles["body_small"]),
+            Paragraph(f"<font color='#{c.hexval()[2:]}'>{sev}</font>", styles["body_small"]),
         ])
 
     t = Table(rows, colWidths=[w*0.05, w*0.47, w*0.16, w*0.1, w*0.17])
@@ -1212,7 +1212,7 @@ def _build_mitigations_section(results, styles, w):
 
         rows.append([
             Paragraph(
-                f"<font color='#{color.hexval()[1:]}'><b>{prio_label}</b></font>",
+                f"<font color='#{color.hexval()[2:]}'><b>{prio_label}</b></font>",
                 styles["body_small"]
             ),
             Paragraph(f.get("title", "")[:50], styles["body_small"]),
