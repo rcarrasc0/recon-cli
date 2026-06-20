@@ -31,6 +31,8 @@ C_BG_LIGHT   = HexColor("#F6F8FA")   # Gris muy claro
 C_BORDER     = HexColor("#30363D")   # Gris oscuro
 C_TEXT       = HexColor("#24292F")   # Texto principal
 C_MUTED      = HexColor("#57606A")   # Texto secundario
+C_TABLE_HEAD = HexColor("#E1E4E8")   # Gris suave para cabeceras de tabla
+C_TABLE_TEXT = HexColor("#1B1F23")   # Texto oscuro sobre cabecera gris
 
 SEV_COLORS = {
     "CRITICAL": HexColor("#DA3633"),
@@ -287,18 +289,42 @@ def _build_cover(results, config, styles, w):
 
     story.append(Spacer(1, 1 * cm))
 
-    # Target box
-    target_data = [[Paragraph(f"<b>TARGET</b>: {target}", ParagraphStyle(
-        "target_box", fontName="Courier-Bold", fontSize=18,
-        textColor=C_ACCENT, alignment=TA_CENTER,
-    ))]]
-    target_table = Table(target_data, colWidths=[w * 0.7])
+    # Target box: etiqueta "TARGET" arriba, endpoint completo debajo
+    # Tamaño de fuente dinámico según longitud para evitar truncado/wrap forzado
+    target_len = len(target)
+    if target_len <= 30:
+        target_fontsize = 18
+    elif target_len <= 45:
+        target_fontsize = 15
+    elif target_len <= 60:
+        target_fontsize = 12
+    else:
+        target_fontsize = 10
+
+    label_style = ParagraphStyle(
+        "target_label", fontName="Helvetica-Bold", fontSize=11,
+        textColor=HexColor("#8B949E"), alignment=TA_CENTER,
+        spaceAfter=4, tracking=2,
+    )
+    value_style = ParagraphStyle(
+        "target_value", fontName="Courier-Bold", fontSize=target_fontsize,
+        textColor=C_ACCENT, alignment=TA_CENTER, leading=target_fontsize + 4,
+        wordWrap="CJK",  # permite partir el dominio si no cabe, sin desbordar
+    )
+
+    target_data = [
+        [Paragraph("TARGET", label_style)],
+        [Paragraph(target, value_style)],
+    ]
+    target_table = Table(target_data, colWidths=[w * 0.85])
     target_table.setStyle(TableStyle([
         ("BACKGROUND",    (0, 0), (-1, -1), HexColor("#161B22")),
         ("LINEABOVE",     (0, 0), (-1, 0),  2, C_ACCENT),
         ("LINEBELOW",     (0, -1), (-1, -1), 2, C_ACCENT),
-        ("TOPPADDING",    (0, 0), (-1, -1), 14),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING",    (0, 0), (0, 0),   14),
+        ("BOTTOMPADDING", (0, 0), (0, 0),   2),
+        ("TOPPADDING",    (0, 1), (0, 1),   2),
+        ("BOTTOMPADDING", (0, 1), (0, 1),   14),
         ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
     ]))
 
@@ -338,38 +364,8 @@ def _build_cover(results, config, styles, w):
     container2.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")]))
     story.append(container2)
 
-    story.append(Spacer(1, 1 * cm))
+    story.append(Spacer(1, 1.5 * cm))
     story.append(ColorLine(w, C_ACCENT, 3))
-
-    # Findings quick stats
-    findings = results.get("findings", [])
-    counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
-    for f in findings:
-        sev = f.get("severity", "INFO").upper()
-        counts[sev] = counts.get(sev, 0) + 1
-
-    story.append(Spacer(1, 0.8 * cm))
-
-    stat_data = [[
-        Paragraph(
-            f"<b><font size='20' color='#{c.hexval()[2:]}'>{counts[sev]}</font></b><br/>"
-            f"<font size='8' color='#8B949E'>{sev}</font>",
-            ParagraphStyle("stat", fontName="Helvetica", alignment=TA_CENTER)
-        )
-        for sev, c in [("CRITICAL", SEV_COLORS["CRITICAL"]),
-                       ("HIGH",     SEV_COLORS["HIGH"]),
-                       ("MEDIUM",   SEV_COLORS["MEDIUM"]),
-                       ("LOW",      SEV_COLORS["LOW"]),
-                       ("INFO",     SEV_COLORS["INFO"])]
-    ]]
-    stat_table = Table(stat_data, colWidths=[w / 5] * 5)
-    stat_table.setStyle(TableStyle([
-        ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING",    (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ("BACKGROUND",    (0, 0), (-1, -1), HexColor("#161B22")),
-    ]))
-    story.append(stat_table)
 
     return story
 
@@ -386,6 +382,31 @@ def _build_executive_summary(results, styles, w):
     story.append(Paragraph("1. Resumen Ejecutivo", styles["h1"]))
     story.append(ColorLine(w, C_ACCENT, 2))
     story.append(Spacer(1, 0.3 * cm))
+
+    # ── KPIs visuales (movidos desde portada) ─────────────────
+    stat_data = [[
+        Paragraph(
+            f"<b><font size=\'20\' color=\'#{c.hexval()[2:]}\'>{counts[sev]}</font></b><br/>"
+            f"<font size=\'8\' color=\'#57606A\'>{sev}</font>",
+            ParagraphStyle("stat", fontName="Helvetica", alignment=TA_CENTER)
+        )
+        for sev, c in [("CRITICAL", SEV_COLORS["CRITICAL"]),
+                       ("HIGH",     SEV_COLORS["HIGH"]),
+                       ("MEDIUM",   SEV_COLORS["MEDIUM"]),
+                       ("LOW",      SEV_COLORS["LOW"]),
+                       ("INFO",     SEV_COLORS["INFO"])]
+    ]]
+    stat_table = Table(stat_data, colWidths=[w / 5] * 5)
+    stat_table.setStyle(TableStyle([
+        ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING",    (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("BACKGROUND",    (0, 0), (-1, -1), C_BG_LIGHT),
+        ("BOX",           (0, 0), (-1, -1), 0.5, C_BORDER),
+        ("LINEAFTER",     (0, 0), (-2, -1), 0.5, C_BORDER),
+    ]))
+    story.append(stat_table)
+    story.append(Spacer(1, 0.5 * cm))
 
     # Texto resumen
     total = len(findings)
@@ -448,8 +469,8 @@ def _build_executive_summary(results, styles, w):
 
     t = Table(rows, colWidths=[w * 0.15, w * 0.1, w * 0.37, w * 0.38])
     t.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, 0),  C_PRIMARY),
-        ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.white),
+        ("BACKGROUND",    (0, 0), (-1, 0),  C_TABLE_HEAD),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  C_TABLE_TEXT),
         ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
         ("FONTSIZE",      (0, 0), (-1, 0),  9),
         ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
@@ -741,8 +762,9 @@ def _build_ssl_section(results, styles, w):
 
         t2 = Table(proto_data, colWidths=[w * 0.25, w * 0.35, w * 0.4])
         t2.setStyle(TableStyle([
-            ("BACKGROUND",    (0, 0), (-1, 0), C_PRIMARY),
-            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+            ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
             ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
             ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
             ("TOPPADDING",    (0, 0), (-1, -1), 5),
@@ -822,8 +844,9 @@ def _build_headers_section(results, styles, w):
 
     t = Table(rows, colWidths=[w * 0.38, w * 0.17, w * 0.45])
     t.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, 0), C_PRIMARY),
-        ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+        ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+        ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
         ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
         ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
         ("TOPPADDING",    (0, 0), (-1, -1), 5),
@@ -841,8 +864,9 @@ def _build_headers_section(results, styles, w):
             leak_rows.append([Paragraph(h, styles["body_small"]), Paragraph(v[:80], styles["body_small"])])
         t2 = Table(leak_rows, colWidths=[w * 0.3, w * 0.7])
         t2.setStyle(TableStyle([
-            ("BACKGROUND",    (0, 0), (-1, 0), C_PRIMARY),
-            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+            ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
             ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
             ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
             ("TOPPADDING",    (0, 0), (-1, -1), 5),
@@ -896,8 +920,9 @@ def _build_waf_section(results, styles, w):
 
         t = Table(rows, colWidths=[w*0.25, w*0.15, w*0.15, w*0.45])
         t.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0),(-1,0),  C_PRIMARY),
-            ("TEXTCOLOR",     (0,0),(-1,0),  colors.white),
+            ("BACKGROUND",    (0,0),(-1,0),  C_TABLE_HEAD),
+            ("TEXTCOLOR",     (0,0),(-1,0),  C_TABLE_TEXT),
+            ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
             ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.white, C_BG_LIGHT]),
             ("GRID",          (0,0),(-1,-1), 0.5, C_BORDER),
             ("TOPPADDING",    (0,0),(-1,-1), 5),
@@ -1002,8 +1027,9 @@ def _build_osint_section(results, styles, w):
                 ])
         t2 = Table(dns_rows, colWidths=[w * 0.1, w * 0.9])
         t2.setStyle(TableStyle([
-            ("BACKGROUND",    (0, 0), (-1, 0), C_PRIMARY),
-            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+            ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
             ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
             ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
             ("TOPPADDING",    (0, 0), (-1, -1), 4),
@@ -1031,8 +1057,9 @@ def _build_osint_section(results, styles, w):
 
         t3 = Table(sub_rows, colWidths=[w * 0.6, w * 0.4])
         t3.setStyle(TableStyle([
-            ("BACKGROUND",    (0, 0), (-1, 0), C_PRIMARY),
-            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+            ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
             ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
             ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
             ("TOPPADDING",    (0, 0), (-1, -1), 4),
@@ -1082,8 +1109,9 @@ def _build_cves_section(results, styles, w):
 
     t = Table(rows, colWidths=[w*0.22, w*0.22, w*0.1, w*0.18, w*0.18])
     t.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, 0), C_PRIMARY),
-        ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+        ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+        ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
         ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
         ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
         ("TOPPADDING",    (0, 0), (-1, -1), 5),
@@ -1151,8 +1179,9 @@ def _build_cvss_table(results, styles, w):
 
     t = Table(rows, colWidths=[w*0.05, w*0.47, w*0.16, w*0.1, w*0.17])
     t.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, 0), C_PRIMARY),
-        ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+        ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+        ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
         ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
         ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
         ("TOPPADDING",    (0, 0), (-1, -1), 5),
@@ -1222,8 +1251,9 @@ def _build_mitigations_section(results, styles, w):
 
     t = Table(rows, colWidths=[w*0.13, w*0.3, w*0.42, w*0.15])
     t.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, 0), C_PRIMARY),
-        ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+        ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+        ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
         ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
         ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
         ("TOPPADDING",    (0, 0), (-1, -1), 5),
