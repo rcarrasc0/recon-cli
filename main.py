@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────
-#  recon-cli · main.py  v1.1.0
+#  recon-cli · main.py
 #  Entry point principal. Orquesta todas las fases del análisis.
 # ─────────────────────────────────────────────────────────────
 
@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich import box
 from rich.table import Table
 
+from version import __version__
 from config import load_config, validate_target
 from modules.osint import run_osint
 from modules.shodan_scan import run_shodan
@@ -25,15 +26,17 @@ from report.pdf_gen import generate_report
 
 console = Console()
 
-BANNER = """
+BANNER_TEMPLATE = """
 ██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗      ██████╗██╗     ██╗
 ██╔══██╗██╔════╝██╔════╝██╔═══██╗████╗  ██║     ██╔════╝██║     ██║
 ██████╔╝█████╗  ██║     ██║   ██║██╔██╗ ██║     ██║     ██║     ██║
 ██╔══██╗██╔══╝  ██║     ██║   ██║██║╚██╗██║     ██║     ██║     ██║
 ██║  ██║███████╗╚██████╗╚██████╔╝██║ ╚████║     ╚██████╗███████╗██║
 ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝      ╚═════╝╚══════╝╚═╝
-                                                            v1.1.0
+                                                            {__version__}
 """
+
+BANNER = BANNER_TEMPLATE.format(__version__=__version__)
 
 
 @click.command()
@@ -67,7 +70,7 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
         f"[bold]Target:[/bold] [green]{target}[/green]  |  "
         f"[bold]Scope:[/bold] [yellow]{scope.upper()}[/yellow]  |  "
         f"[bold]Inicio:[/bold] {start_time.strftime('%Y-%m-%d %H:%M:%S')}",
-        title="[bold white]recon-cli v1.1.0[/bold white]",
+        title=f"[bold white]recon-cli {__version__}[/bold white]",
         border_style="cyan"
     ))
 

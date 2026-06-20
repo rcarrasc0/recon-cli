@@ -21,7 +21,7 @@ from reportlab.platypus.flowables import Flowable
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import HexColor
 
-RECON_CLI_VERSION = "v1.2.0"
+from version import __version__ as RECON_CLI_VERSION
 
 # ── Paleta de colores ─────────────────────────────────────────
 C_PRIMARY    = HexColor("#0D1117")   # Negro profundo
@@ -318,7 +318,7 @@ def _build_cover(results, config, styles, w):
         ["Versión herramienta", RECON_CLI_VERSION],
     ]
     meta_style = ParagraphStyle("meta_k", fontName="Helvetica", fontSize=10, textColor=HexColor("#8B949E"))
-    meta_val_s = ParagraphStyle("meta_v", fontName="Helvetica-Bold", fontSize=10, textColor=colors.white)
+    meta_val_s = ParagraphStyle("meta_v", fontName="Helvetica-Bold", fontSize=10, textColor=C_TEXT)
 
     meta_data = [[
         Paragraph(k, meta_style),
