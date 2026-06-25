@@ -60,6 +60,8 @@ TECH_SIGNATURES = {
 
 
 def run_enumeration(target: str, target_info: dict, osint_data: dict, config: dict) -> dict:
+    global console
+    console = config.get("console") or console
     results = {
         "subdomains": [],
         "live_hosts": [],
@@ -143,7 +145,13 @@ def run_enumeration(target: str, target_info: dict, osint_data: dict, config: di
         console.print(f"[cyan]  [*][/cyan] nmap -sV en {len(ips_to_scan[:3])} IP(s)...")
         results["nmap_services"] = _run_nmap_version_scan(ips_to_scan[:3], config)
         if results["nmap_services"]:
-            console.print(f"  [green]✓[/green] {len(results['nmap_services'])} servicio(s) con versión detectada")
+            with_ver    = [s for s in results["nmap_services"] if s.get("version")]
+            without_ver = [s for s in results["nmap_services"] if not s.get("version")]
+            console.print(
+                f"  [green]✓[/green] nmap -sV: {len(results['nmap_services'])} servicio(s) abiertos "
+                f"— [green]{len(with_ver)} con versión[/green]"
+                + (f", [dim]{len(without_ver)} sin versión[/dim]" if without_ver else "")
+            )
     else:
         results["nmap_services"] = []
 
@@ -353,13 +361,24 @@ def _detect_technologies(host: str, config: dict) -> dict:
 
 
 def _extract_version_from_html(tech: str, html: str) -> str:
-    """Extrae version de una tecnologia buscando patrones en URLs del HTML."""
+    """Extrae versión de una tecnología buscando patrones en URLs del HTML.
+
+    p1 — patrón con nombre de la tech (jquery-3.7.1.min.js)       → siempre
+    p2 — patrón genérico ?ver=X.Y.Z                                → SOLO techs no-JS-genéricas
+         para jQuery/Bootstrap/React/Vue/Angular este patrón captura
+         el ?ver= de WordPress y propaga su versión incorrectamente
+    p3 — data-version="X.Y.Z"                                     → siempre
+    """
     tech_key = tech.lower().replace(".js", "")
-    p1 = re.compile(tech_key + r"[-/](\d+(?:[.]\d+)+)", re.IGNORECASE)
-    p2 = re.compile(r"[?&]v(?:er)?=(\d+(?:[.]\d+)+)", re.IGNORECASE)
-    dv = r'data-version'
-    p3 = re.compile(dv + r'=["\']?(\d+(?:[.]\d+)+)["\']?', re.IGNORECASE)
-    for pat in (p1, p2, p3):
+    p1 = re.compile(tech_key + r"[-/.](\d+(?:[.]\d+)+)", re.IGNORECASE)
+    p3 = re.compile(r'data-version=["\']?(\d+(?:[.]\d+)+)["\']?', re.IGNORECASE)
+
+    # p2 solo para techs que no son librerías JS de baja confianza
+    # — evita que ?ver=X.Y.Z de WordPress se propague a jQuery/Bootstrap
+    use_p2 = tech not in LOW_CONFIDENCE_TECHS
+    p2 = re.compile(r"[?&]v(?:er)?=(\d+(?:[.]\d+)+)", re.IGNORECASE) if use_p2 else None
+
+    for pat in filter(None, [p1, p2, p3]):
         m = pat.search(html)
         if m:
             candidate = m.group(1).rstrip(".")
