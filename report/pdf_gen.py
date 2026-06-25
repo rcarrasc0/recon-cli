@@ -232,29 +232,54 @@ def generate_report(results: dict, output_path: str, config: dict):
     story += _build_ssl_section(results, styles, content_width)
 
     # ── ANÁLISIS DE CABECERAS ─────────────────────────────────
+    # Continúa en la misma página que SSL/TLS si cabe
+    story.append(Spacer(1, 0.5 * cm))
     story += _build_headers_section(results, styles, content_width)
 
-    # ── WAF / CDN ─────────────────────────────────────────────
-    if results.get("waf_cdn"):
+    # ── WAF/CDN ───────────────────────────────────────────────
+    # Nueva página solo si WAF tiene contenido real
+    waf_detected = results.get("waf_cdn", {}).get("detected", [])
+    if waf_detected:
         story.append(PageBreak())
-        story += _build_waf_section(results, styles, content_width)
+    else:
+        story.append(Spacer(1, 0.5 * cm))
+    story += _build_waf_section(results, styles, content_width)
 
     # ── OSINT & RECONOCIMIENTO ────────────────────────────────
     story.append(PageBreak())
     story += _build_osint_section(results, styles, content_width)
 
-    # ── CVEs ──────────────────────────────────────────────────
-    if results.get("cves"):
+    # ── CVEs — nueva página solo si hay resultados ────────────
+    cves = results.get("cves", [])
+    if cves:
         story.append(PageBreak())
-        story += _build_cves_section(results, styles, content_width)
+    else:
+        story.append(Spacer(1, 0.5 * cm))
+    story += _build_cves_section(results, styles, content_width)
 
-    # ── TABLA CVSS CONSOLIDADA ────────────────────────────────
-    story.append(PageBreak())
-    story += _build_cvss_table(results, styles, content_width)
+    # ── TABLA CVSS CONSOLIDADA — solo si hay hallazgos con CVSS ─
+    cvss_findings = [f for f in results.get("findings", []) if f.get("cvss", 0) > 0]
+    if cvss_findings:
+        story.append(PageBreak())
+        story += _build_cvss_table(results, styles, content_width)
+
+    # ── OPORTUNIDADES DE MEJORA (dominio raíz) ───────────────
+    if results.get("root_domain_findings"):
+        story.append(PageBreak())
+        story += _build_improvement_section(results, styles, content_width)
+
+    # ── MITRE ATT&CK ──────────────────────────────────────────
+    if results.get("mitre_techniques"):
+        story.append(PageBreak())
+        story += _build_mitre_section(results, styles, content_width)
 
     # ── PROPUESTAS DE MITIGACIÓN ──────────────────────────────
     story.append(PageBreak())
     story += _build_mitigations_section(results, styles, content_width)
+
+    # ── METADATOS DE EJECUCIÓN (última sección) ───────────────
+    story.append(PageBreak())
+    story += _build_execution_metadata(results, styles, content_width)
 
     # Construir PDF
     doc.build(story, canvasmaker=PageNumCanvas)
@@ -399,8 +424,8 @@ def _build_executive_summary(results, styles, w):
     stat_table = Table(stat_data, colWidths=[w / 5] * 5)
     stat_table.setStyle(TableStyle([
         ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING",    (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING",    (0, 0), (-1, -1), 18),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 18),
         ("BACKGROUND",    (0, 0), (-1, -1), C_BG_LIGHT),
         ("BOX",           (0, 0), (-1, -1), 0.5, C_BORDER),
         ("LINEAFTER",     (0, 0), (-2, -1), 0.5, C_BORDER),
@@ -412,9 +437,17 @@ def _build_executive_summary(results, styles, w):
     total = len(findings)
     critical_high = counts["CRITICAL"] + counts["HIGH"]
 
-    risk_level = "CRÍTICO" if counts["CRITICAL"] > 0 else \
-                 "ALTO"     if counts["HIGH"] > 2    else \
-                 "MEDIO"    if counts["MEDIUM"] > 5   else "BAJO"
+    # Riesgo global = severidad más alta encontrada (sin ponderaciones)
+    if counts["CRITICAL"] > 0:
+        risk_level = "CRÍTICO"
+    elif counts["HIGH"] > 0:
+        risk_level = "ALTO"
+    elif counts["MEDIUM"] > 0:
+        risk_level = "MEDIO"
+    elif counts["LOW"] > 0:
+        risk_level = "BAJO"
+    else:
+        risk_level = "INFORMATIVO"
 
     story.append(Paragraph(
         f"El análisis de seguridad realizado sobre el objetivo <b>{results['target']}</b> "
@@ -441,7 +474,7 @@ def _build_executive_summary(results, styles, w):
 
     header = [
         Paragraph("<b>Severidad</b>", styles["body"]),
-        Paragraph("<b>Cantidad</b>", styles["body"]),
+        Paragraph("<b>#</b>", styles["body"]),
         Paragraph("<b>Impacto</b>", styles["body"]),
         Paragraph("<b>Acción recomendada</b>", styles["body"]),
     ]
@@ -467,7 +500,7 @@ def _build_executive_summary(results, styles, w):
             Paragraph(action, styles["body_small"]),
         ])
 
-    t = Table(rows, colWidths=[w * 0.15, w * 0.1, w * 0.37, w * 0.38])
+    t = Table(rows, colWidths=[w * 0.15, w * 0.07, w * 0.39, w * 0.39])
     t.setStyle(TableStyle([
         ("BACKGROUND",    (0, 0), (-1, 0),  C_TABLE_HEAD),
         ("TEXTCOLOR",     (0, 0), (-1, 0),  C_TABLE_TEXT),
@@ -481,6 +514,66 @@ def _build_executive_summary(results, styles, w):
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(t)
+
+    # ── Tabla resumen MITRE (para CISO) ───────────────────────
+    mitre_techniques = results.get("mitre_techniques", [])
+    if mitre_techniques:
+        story.append(Spacer(1, 0.5 * cm))
+        story.append(Paragraph("Resumen de técnicas ATT&CK identificadas:", styles["h2"]))
+
+        tactic_colors = {
+            "TA0043": HexColor("#0D6634"),
+            "TA0001": HexColor("#DA3633"),
+            "TA0002": HexColor("#E36209"),
+            "TA0006": HexColor("#8250DF"),
+            "TA0007": HexColor("#1F6FEB"),
+            "TA0008": HexColor("#E36209"),
+            "TA0009": HexColor("#D29922"),
+        }
+
+        mitre_rows = [[
+            Paragraph("<b>Táctica</b>",    styles["body"]),
+            Paragraph("<b>Técnica</b>",    styles["body"]),
+            Paragraph("<b>Sub-técnica</b>",styles["body"]),
+        ]]
+        for tech in mitre_techniques:
+            tc = tactic_colors.get(tech["tactic_id"], C_MUTED)
+            mitre_rows.append([
+                Paragraph(
+                    f"<font color='#{tc.hexval()[2:]}'><b>{tech['tactic_id']}</b></font> "
+                    f"<font size='8'>{tech['tactic']}</font>",
+                    styles["body_small"]
+                ),
+                Paragraph(
+                    f"<b>{tech['technique_id']}</b> "
+                    f"<font size='8'>{tech['technique']}</font>",
+                    styles["body_small"]
+                ),
+                Paragraph(
+                    f"<b>{tech['subtechnique_id']}</b> <font size='8'>{tech['subtechnique']}</font>"
+                    if tech.get("subtechnique_id")
+                    else "<font size='8' color='#57606A'>—</font>",
+                    styles["body_small"]
+                ),
+            ])
+
+        mt = Table(mitre_rows, colWidths=[w*0.3, w*0.35, w*0.35])
+        mt.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),  C_TABLE_HEAD),
+            ("TEXTCOLOR",     (0,0),(-1,0),  C_TABLE_TEXT),
+            ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.white, C_BG_LIGHT]),
+            ("GRID",          (0,0),(-1,-1), 0.5, C_BORDER),
+            ("TOPPADDING",    (0,0),(-1,-1), 5),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+            ("LEFTPADDING",   (0,0),(-1,-1), 8),
+            ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+        ]))
+        story.append(mt)
+        story.append(Paragraph(
+            f"<i>Detalle completo en sección 10. Correlación MITRE ATT&CK.</i>",
+            styles["body_small"]
+        ))
 
     # ── Warning NVD si hubo errores ───────────────────────────
     nvd_status = results.get("config_snapshot", {}).get("nvd_status") or ""
@@ -525,25 +618,27 @@ def _build_scope_section(results, styles, w):
     ips_str = ", ".join(ti.get("ips", [])) or "N/A"
 
     story.append(Paragraph("2.1 Definición del alcance", styles["h2"]))
+    k_st = ParagraphStyle("scope_k", fontName="Helvetica-Bold", fontSize=9, textColor=C_TEXT)
+    v_st = ParagraphStyle("scope_v", fontName="Helvetica",      fontSize=9, textColor=C_TEXT, leading=13)
+
     scope_data = [
-        ["Target",          results["target"]],
-        ["Tipo",            ti.get("type", "N/A").upper()],
-        ["IPs resueltas",   ips_str],
-        ["Modalidad",       results.get("scope", "blackbox").upper()],
-        ["Fecha inicio",    results["start_time"].strftime("%Y-%m-%d %H:%M:%S")],
-        ["Fecha fin",       results.get("end_time", results["start_time"]).strftime("%Y-%m-%d %H:%M:%S")],
-        ["Duración",        f"{results.get('duration', 'N/A')}"],
+        [Paragraph("Target",        k_st), Paragraph(results["target"],                                                              v_st)],
+        [Paragraph("Tipo",          k_st), Paragraph(ti.get("type", "N/A").upper(),                                                  v_st)],
+        [Paragraph("IPs resueltas", k_st), Paragraph(ips_str,                                                                        v_st)],
+        [Paragraph("Modalidad",     k_st), Paragraph(results.get("scope", "blackbox").upper(),                                       v_st)],
+        [Paragraph("Fecha inicio",  k_st), Paragraph(results["start_time"].strftime("%Y-%m-%d %H:%M:%S"),                            v_st)],
+        [Paragraph("Fecha fin",     k_st), Paragraph(results.get("end_time", results["start_time"]).strftime("%Y-%m-%d %H:%M:%S"),   v_st)],
+        [Paragraph("Duración",      k_st), Paragraph(str(results.get("duration", "N/A")),                                            v_st)],
     ]
 
     t = Table(scope_data, colWidths=[w * 0.3, w * 0.7])
     t.setStyle(TableStyle([
-        ("FONTNAME",      (0, 0), (0, -1), "Helvetica-Bold"),
-        ("FONTSIZE",      (0, 0), (-1,-1), 9),
         ("ROWBACKGROUNDS",(0, 0), (-1, -1), [C_BG_LIGHT, colors.white]),
         ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
         ("TOPPADDING",    (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
     ]))
     story.append(t)
 
@@ -556,26 +651,33 @@ def _build_scope_section(results, styles, w):
         styles["body"]
     ))
 
-    phases = [
-        ["Fase 1 — OSINT",             "WHOIS, DNS, AXFR, certificados (crt.sh), ASN/BGP"],
-        ["Fase 2 — Shodan",            "Servicios expuestos, puertos, banners, CVEs indexados"],
-        ["Fase 3 — Leak-Lookup",       "Credenciales y emails filtrados en brechas conocidas"],
-        ["Fase 4 — Enumeración",       "Subdominios, hosts activos, detección de tecnologías"],
-        ["Fase 5 — SSL/TLS",           "Protocolos, cifrados, certificado, HSTS, vulnerabilidades"],
-        ["Fase 6 — Cabeceras HTTP",    "Security headers, CSP, cookies, fugas de información"],
-        ["Fase 7 — WAF/CDN",           "Detección de Cloudflare, AWS WAF/CloudFront y otros proveedores"],
-        ["Fase 8 — CVEs",              "Búsqueda en NVD/NIST por productos y versiones detectadas"],
+    fk_st = ParagraphStyle("fase_k", fontName="Helvetica-Bold", fontSize=9, textColor=C_TEXT)
+    fv_st = ParagraphStyle("fase_v", fontName="Helvetica",      fontSize=9, textColor=C_TEXT, leading=13)
+
+    phases_data = [
+        [Paragraph(k, fk_st), Paragraph(v, fv_st)]
+        for k, v in [
+            ("Fase 1 — OSINT",          "WHOIS, DNS, AXFR, crt.sh, ASN/BGP. Separación automática endpoint vs. dominio raíz."),
+            ("Fase 2 — Shodan",         "Servicios expuestos, puertos y banners indexados."),
+            ("Fase 3 — Leak-Lookup",    "Credenciales y emails filtrados en brechas conocidas."),
+            ("Fase 4 — Enumeración",    "Subdominios, hosts activos, fingerprinting de tecnologías y detección de versiones (nmap -sV)."),
+            ("Fase 5 — SSL/TLS",        "Protocolos, cifrados, certificado X.509, HSTS y vulnerabilidades."),
+            ("Fase 6 — Cabeceras HTTP", "Security headers, Content Security Policy, cookies y fugas de información."),
+            ("Fase 7 — WAF/CDN",        "Detección pasiva de Cloudflare, AWS, Azure, Akamai y otros. Rangos IP estáticos y dinámicos."),
+            ("Fase 8 — CVEs",           "Correlación CVE/CVSS con NVD/NIST (solo versión confirmada). Fallback automático a CIRCL Vulnerability-Lookup si NVD no está disponible."),
+            ("Fase 9 — MITRE ATT&CK",   "Correlación táctica + técnica + sub-técnica de MITRE ATT&CK Enterprise. Sin API externa. Mappings conservadores."),
+            ("Fase 10 — Dom. Raíz",     "Análisis WHOIS, ASN/BGP, SPF y DMARC del dominio raíz. Separado del scoring del endpoint analizado."),
+        ]
     ]
 
-    t2 = Table(phases, colWidths=[w * 0.3, w * 0.7])
+    t2 = Table(phases_data, colWidths=[w * 0.3, w * 0.7])
     t2.setStyle(TableStyle([
-        ("FONTNAME",      (0, 0), (0, -1), "Helvetica-Bold"),
-        ("FONTSIZE",      (0, 0), (-1,-1), 9),
         ("ROWBACKGROUNDS",(0, 0), (-1, -1), [C_BG_LIGHT, colors.white]),
         ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
         ("TOPPADDING",    (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
     ]))
     story.append(t2)
 
@@ -653,6 +755,21 @@ def _build_finding_card(finding, idx, sev, styles, w):
             Paragraph(f"<b>Mitigación:</b> {rem}", styles["remediation"])
         ])
 
+    # Badge MITRE si existe
+    mitre = finding.get("mitre")
+    if mitre:
+        sub = mitre.get("subtechnique_id")
+        tech_ref = f"{sub} · {mitre['subtechnique']}" if sub else f"{mitre['technique_id']} · {mitre['technique']}"
+        content_rows.append([
+            Paragraph(
+                f"<font color='#0D6634'>⚑ MITRE ATT&CK</font> "
+                f"<font color='#57606A'>{mitre['tactic']} ({mitre['tactic_id']}) → "
+                f"{tech_ref}</font>",
+                ParagraphStyle("mitre_badge", fontName="Helvetica", fontSize=8,
+                               textColor=HexColor("#24292F"), leading=12)
+            )
+        ])
+
     inner = Table(content_rows, colWidths=[w - 1.2 * cm])
     inner.setStyle(TableStyle([
         ("BACKGROUND",    (0, 0), (-1, -1), SEV_BG.get(sev, C_BG_LIGHT)),
@@ -689,6 +806,179 @@ def _build_finding_card(finding, idx, sev, styles, w):
 
 
 # ── SSL/TLS ───────────────────────────────────────────────────
+def _build_improvement_section(results, styles, w):
+    """
+    Sección separada para hallazgos de dominio raíz (SPF, DMARC, WHOIS emails).
+    No afectan al scoring CVSS del endpoint analizado.
+    """
+    story        = []
+    findings     = results.get("root_domain_findings", [])
+    target_info  = results.get("target_info", {})
+    root_domain  = target_info.get("root_domain", "dominio raíz")
+
+    story.append(Paragraph("10. Análisis del Dominio Raíz", styles["h1"]))
+    story.append(ColorLine(w, C_ACCENT, 2))
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph(
+        f"Los siguientes aspectos corresponden a la configuración del dominio raíz "
+        f"<b>{root_domain}</b> y no al endpoint analizado directamente. "
+        f"Se documentan como oportunidades de mejora dado que afectan a todos los "
+        f"subdominios y servicios bajo ese dominio, pero <b>no forman parte del "
+        f"scoring de seguridad del endpoint evaluado</b>.",
+        styles["body"]
+    ))
+    story.append(Spacer(1, 0.4 * cm))
+
+    for finding in findings:
+        title = finding.get("title", "")
+        desc  = finding.get("description", "")
+        rem   = finding.get("remediation", "")
+
+        block = [
+            Paragraph(f"<b>{title}</b>",
+                ParagraphStyle("imp_title", fontName="Helvetica-Bold", fontSize=10,
+                               textColor=C_ACCENT2, spaceAfter=3)),
+        ]
+        if desc:
+            block.append(Paragraph(desc, styles["finding_body"]))
+        if rem:
+            block.append(Paragraph(f"<b>Recomendación:</b> {rem}", styles["remediation"]))
+        block.append(Spacer(1, 0.15 * cm))
+
+        inner = Table([[p] for p in block], colWidths=[w - 0.8 * cm])
+        inner.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), C_BG_LIGHT),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 12),
+            ("TOPPADDING",    (0, 0), (0, 0),   10),
+            ("BOTTOMPADDING", (0, -1),(-1,-1),  10),
+            ("TOPPADDING",    (0, 1), (-1, -1),  3),
+            ("BOTTOMPADDING", (0, 0), (-1, -2),  2),
+        ]))
+
+        outer = Table([[inner]], colWidths=[w])
+        outer.setStyle(TableStyle([
+            ("LEFTPADDING",  (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING",   (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING",(0, 0), (-1, -1), 0),
+            ("LINEABOVE",    (0, 0), (-1, 0),  2, C_ACCENT2),
+            ("BOX",          (0, 0), (-1, -1), 0.5, C_BORDER),
+        ]))
+        story.append(outer)
+        story.append(Spacer(1, 0.2 * cm))
+
+    story.append(Spacer(1, 0.3 * cm))
+    story.append(Paragraph(
+        f"<i>Nota: estas observaciones se basan en el análisis DNS del dominio "
+        f"{root_domain} durante el reconocimiento OSINT. Para una evaluación "
+        f"completa de la seguridad del correo electrónico se recomienda un análisis "
+        f"específico del dominio corporativo.</i>",
+        styles["body_small"]
+    ))
+
+    return story
+
+
+
+def _build_mitre_section(results, styles, w):
+    story      = []
+    techniques = results.get("mitre_techniques", [])
+
+    story.append(Paragraph("11. Correlación MITRE ATT&CK", styles["h1"]))
+    story.append(ColorLine(w, C_ACCENT, 2))
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph(
+        "Los hallazgos identificados se correlacionan con las técnicas del framework "
+        "<b>MITRE ATT&CK Enterprise</b>, permitiendo contextualizar el riesgo desde "
+        "la perspectiva del adversario y alinearlo con marcos de defensa.",
+        styles["body"]
+    ))
+    story.append(Spacer(1, 0.4 * cm))
+
+    if not techniques:
+        story.append(Paragraph("No se identificaron correlaciones MITRE para este análisis.", styles["body"]))
+        return story
+
+    # ── Tabla de técnicas únicas ──────────────────────────────
+    rows = [[
+        Paragraph("<b>Táctica</b>",       styles["body"]),
+        Paragraph("<b>Técnica</b>",        styles["body"]),
+        Paragraph("<b>Sub-técnica</b>",    styles["body"]),
+        Paragraph("<b>Hallazgos</b>",      styles["body"]),
+    ]]
+
+    tactic_colors = {
+        "TA0043": HexColor("#0D6634"),  # Reconnaissance   → verde oscuro
+        "TA0001": HexColor("#DA3633"),  # Initial Access    → rojo
+        "TA0002": HexColor("#E36209"),  # Execution         → naranja
+        "TA0006": HexColor("#8250DF"),  # Credential Access → morado
+        "TA0007": HexColor("#1F6FEB"),  # Discovery         → azul
+        "TA0008": HexColor("#E36209"),  # Lateral Movement  → naranja
+        "TA0009": HexColor("#D29922"),  # Collection        → amarillo
+    }
+
+    for tech in techniques:
+        tcolor = tactic_colors.get(tech["tactic_id"], C_MUTED)
+
+        tactic_str = (
+            f"<font color='#{tcolor.hexval()[2:]}'><b>{tech['tactic_id']}</b></font><br/>"
+            f"<font size='8'>{tech['tactic']}</font>"
+        )
+        technique_str = (
+            f"<b>{tech['technique_id']}</b><br/>"
+            f"<font size='8'>{tech['technique']}</font>"
+        )
+        if tech.get("subtechnique_id"):
+            sub_str = (
+                f"<b>{tech['subtechnique_id']}</b><br/>"
+                f"<font size='8'>{tech['subtechnique']}</font>"
+            )
+        else:
+            sub_str = "<font size='8' color='#57606A'>—</font>"
+
+        findings_list = tech.get("findings", [])
+        findings_str  = "<br/>".join(
+            f"<font size='7'>· {f[:55]}{'…' if len(f) > 55 else ''}</font>"
+            for f in findings_list[:4]
+        )
+        if len(findings_list) > 4:
+            findings_str += f"<br/><font size='7' color='#57606A'>(+{len(findings_list)-4} más)</font>"
+
+        rows.append([
+            Paragraph(tactic_str,    styles["body_small"]),
+            Paragraph(technique_str, styles["body_small"]),
+            Paragraph(sub_str,       styles["body_small"]),
+            Paragraph(findings_str,  styles["body_small"]),
+        ])
+
+    t = Table(rows, colWidths=[w*0.18, w*0.22, w*0.22, w*0.38])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, 0),  C_TABLE_HEAD),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  C_TABLE_TEXT),
+        ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
+        ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
+        ("TOPPADDING",    (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+    ]))
+    story.append(t)
+
+    # ── Nota de enlace ────────────────────────────────────────
+    story.append(Spacer(1, 0.3 * cm))
+    story.append(Paragraph(
+        "<i>Referencia: https://attack.mitre.org/ — MITRE ATT&CK® es una marca registrada de The MITRE Corporation.</i>",
+        styles["body_small"]
+    ))
+
+    return story
+
+
+
 def _build_ssl_section(results, styles, w):
     story = []
     ssl   = results.get("ssl_tls", {})
@@ -988,30 +1278,17 @@ def _build_osint_section(results, styles, w):
     story.append(ColorLine(w, C_ACCENT, 2))
     story.append(Spacer(1, 0.3 * cm))
 
-    # WHOIS
-    whois_data = osint.get("whois", {})
-    if whois_data:
-        story.append(Paragraph("7.1 WHOIS", styles["h2"]))
-        whois_rows = [
-            ["Registrador",     whois_data.get("registrar", "N/A")],
-            ["Organización",    whois_data.get("org", "N/A")],
-            ["País",            whois_data.get("country", "N/A")],
-            ["Creación",        str(whois_data.get("creation_date", "N/A"))[:30]],
-            ["Expiración",      str(whois_data.get("expiration_date", "N/A"))[:30]],
-            ["Name Servers",    ", ".join(whois_data.get("name_servers", []))[:80]],
-            ["Emails WHOIS",    ", ".join(whois_data.get("emails", []))[:80] or "N/A"],
-        ]
-        t = Table(whois_rows, colWidths=[w * 0.25, w * 0.75])
-        t.setStyle(TableStyle([
-            ("FONTNAME",      (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTSIZE",      (0, 0), (-1,-1), 8),
-            ("ROWBACKGROUNDS",(0, 0), (-1, -1), [C_BG_LIGHT, colors.white]),
-            ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
-            ("TOPPADDING",    (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING",   (0, 0), (-1, -1), 8),
-        ]))
-        story.append(t)
+    is_sub = results.get("target_info", {}).get("is_subdomain", False)
+    root   = results.get("target_info", {}).get("root_domain", "")
+    if is_sub:
+        story.append(Paragraph(
+            f"Esta sección recoge los datos de reconocimiento directamente asociados al endpoint "
+            f"<b>{results.get('target','')}</b>. "
+            f"Los datos del dominio raíz <b>{root}</b> (WHOIS, ASN, SPF/DMARC) "
+            f"se encuentran en la sección 10.",
+            styles["body_small"]
+        ))
+        story.append(Spacer(1, 0.2 * cm))
 
     # DNS Records
     dns_records = osint.get("dns_records", {})
@@ -1079,6 +1356,21 @@ def _build_cves_section(results, styles, w):
     story.append(Paragraph("8. CVEs Identificados", styles["h1"]))
     story.append(ColorLine(w, C_ACCENT, 2))
     story.append(Spacer(1, 0.3 * cm))
+
+    snap       = results.get("config_snapshot", {})
+    cve_source = snap.get("cve_source", "NVD/NIST")
+    cve_reason = snap.get("cve_reason", "")
+
+    if not cves:
+        if cve_source == "none":
+            msg = "No se identificaron productos con versión confirmada para correlación CVE."
+        else:
+            base = f"No se encontraron CVEs para los productos detectados."
+            src  = f" Fuente consultada: <b>{cve_source}</b>."
+            rsn  = f" {cve_reason}" if cve_reason else ""
+            msg  = base + src + rsn
+        story.append(Paragraph(msg, styles["body"]))
+        return story
 
     story.append(Paragraph(
         f"Se han identificado {len(cves)} CVE(s) asociados a los productos y versiones detectados "
@@ -1193,10 +1485,59 @@ def _build_cvss_table(results, styles, w):
     return story
 
 
+# ── METADATOS DE EJECUCIÓN ────────────────────────────────────
+def _build_execution_metadata(results, styles, w):
+    story = []
+    story.append(Paragraph("Metadatos de Ejecución", styles["h1"]))
+    story.append(ColorLine(w, C_ACCENT, 2))
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph(
+        "Trazabilidad técnica de la ejecución que generó este informe.",
+        styles["body"]
+    ))
+    story.append(Spacer(1, 0.3 * cm))
+
+    start_time = results.get("start_time")
+    end_time   = results.get("end_time")
+    duration   = results.get("duration")
+
+    k_st = ParagraphStyle("meta_k2", fontName="Helvetica-Bold", fontSize=9, textColor=C_MUTED)
+    v_st = ParagraphStyle("meta_v2", fontName="Courier",        fontSize=9, textColor=C_TEXT, leading=13)
+
+    rows_data = [
+        ("Run ID",              results.get("run_id", "—")),
+        ("Comando ejecutado",   results.get("command", "—")),
+        ("Target",              results.get("target", "—")),
+        ("Scope",               results.get("scope", "—").upper()),
+        ("Inicio",              start_time.strftime("%Y-%m-%d %H:%M:%S") if start_time else "—"),
+        ("Fin",                 end_time.strftime("%Y-%m-%d %H:%M:%S")   if end_time   else "—"),
+        ("Duración (s)",        str(duration.seconds) if duration else "—"),
+        ("Versión herramienta", RECON_CLI_VERSION),
+    ]
+
+    table_data = [[Paragraph(k, k_st), Paragraph(v, v_st)] for k, v in rows_data]
+
+    t = Table(table_data, colWidths=[w * 0.28, w * 0.72])
+    t.setStyle(TableStyle([
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.white, C_BG_LIGHT]),
+        ("GRID",           (0, 0), (-1, -1), 0.5, C_BORDER),
+        ("TOPPADDING",     (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING",  (0, 0), (-1, -1), 7),
+        ("LEFTPADDING",    (0, 0), (-1, -1), 10),
+        ("VALIGN",         (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND",     (0, 0), (-1, 0),  HexColor("#F0FFF8")),
+        ("LINEABOVE",      (0, 0), (-1, 0),  1.5, C_ACCENT),
+    ]))
+    story.append(t)
+
+    return story
+
+
 # ── MITIGACIONES ──────────────────────────────────────────────
 def _build_mitigations_section(results, styles, w):
     story = []
-    story.append(Paragraph("10. Propuestas de Mitigación", styles["h1"]))
+    story.append(Paragraph("12. Propuestas de Mitigación", styles["h1"]))
     story.append(ColorLine(w, C_ACCENT, 2))
     story.append(Spacer(1, 0.3 * cm))
 

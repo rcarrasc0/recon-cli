@@ -136,6 +136,8 @@ WAF_BLOCK_PATTERNS = {
 
 
 def run_waf_cdn(target: str, target_info: dict, config: dict) -> dict:
+    global console
+    console = config.get("console") or console
     results = {
         "detected":     [],
         "ip_provider":  {},

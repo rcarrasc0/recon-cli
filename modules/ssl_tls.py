@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa
 from rich.console import Console
 from rich.table import Table
 from rich import box
@@ -33,21 +34,32 @@ WEAK_CIPHER_PATTERNS = [
 # Algoritmos de firma débiles
 WEAK_SIGNATURE_ALGORITHMS = ["md5", "sha1"]
 
+# Tamaños mínimos de clave por tipo de algoritmo
+# RSA/DSA: mínimo 2048 bits
+# ECDSA/EC: P-256 (256 bits) es seguro — mínimo recomendado 224 bits
+KEY_MIN_BITS = {
+    "rsa": 2048,
+    "dsa": 2048,
+    "ec":  224,   # P-256 (256 bits) es seguro según NIST
+}
+
 
 def run_ssl_analysis(target: str, target_info: dict, config: dict) -> dict:
+    global console
+    console = config.get("console") or console
     results = {
-        "certificate": {},
-        "protocols": {},
-        "ciphers": [],
+        "certificate":  {},
+        "protocols":    {},
+        "ciphers":      [],
         "vulnerabilities": [],
-        "hsts": False,
+        "hsts":         False,
         "hsts_max_age": 0,
         "ocsp_stapling": False,
-        "findings": [],
+        "findings":     [],
     }
 
-    host = target_info.get("domain") or target_info.get("value")
-    port = 443
+    host    = target_info.get("domain") or target_info.get("value")
+    port    = 443
     timeout = config.get("REQUEST_TIMEOUT", 10)
 
     # Comprobar si hay puerto 443 abierto
@@ -61,8 +73,11 @@ def run_ssl_analysis(target: str, target_info: dict, config: dict) -> dict:
     if cert_data:
         results["certificate"] = cert_data
         _check_certificate_findings(cert_data, results)
-        console.print(f"  [green]✓[/green] CN: {cert_data.get('subject_cn', 'N/A')} | "
-                      f"Expira: {cert_data.get('not_after', 'N/A')}")
+        console.print(
+            f"  [green]✓[/green] CN: {cert_data.get('subject_cn', 'N/A')} | "
+            f"Expira: {cert_data.get('not_after', 'N/A')} | "
+            f"Clave: {cert_data.get('key_type','?').upper()} {cert_data.get('key_size',0)} bits"
+        )
     else:
         console.print("  [yellow]![/yellow] No se pudo obtener el certificado")
 
@@ -70,8 +85,8 @@ def run_ssl_analysis(target: str, target_info: dict, config: dict) -> dict:
     console.print(f"[cyan]  [*][/cyan] Ejecutando sslyze...")
     sslyze_data = _run_sslyze(host, port)
     if sslyze_data:
-        results["protocols"]   = sslyze_data.get("protocols", {})
-        results["ciphers"]     = sslyze_data.get("ciphers", [])
+        results["protocols"]     = sslyze_data.get("protocols", {})
+        results["ciphers"]       = sslyze_data.get("ciphers", [])
         results["ocsp_stapling"] = sslyze_data.get("ocsp_stapling", False)
         _check_protocol_findings(sslyze_data, results)
         console.print(f"  [green]✓[/green] sslyze completado")
@@ -137,69 +152,85 @@ def _get_certificate(host: str, port: int, timeout: int) -> dict:
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx.verify_mode    = ssl.CERT_NONE
+
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                der = ssock.getpeercert(binary_form=True)
+                der  = ssock.getpeercert(binary_form=True)
+                cert = x509.load_der_x509_certificate(der, default_backend())
 
-        cert = x509.load_der_x509_certificate(der, default_backend())
+                # Subject
+                subject_cn = ""
+                try:
+                    subject_cn = cert.subject.get_attributes_for_oid(
+                        x509.NameOID.COMMON_NAME)[0].value
+                except Exception:
+                    pass
 
-        # Subject
-        subject_cn = ""
-        try:
-            subject_cn = cert.subject.get_attributes_for_oid(
-                x509.NameOID.COMMON_NAME)[0].value
-        except Exception:
-            pass
+                issuer_cn = ""
+                try:
+                    issuer_cn = cert.issuer.get_attributes_for_oid(
+                        x509.NameOID.COMMON_NAME)[0].value
+                except Exception:
+                    pass
 
-        issuer_cn = ""
-        try:
-            issuer_cn = cert.issuer.get_attributes_for_oid(
-                x509.NameOID.COMMON_NAME)[0].value
-        except Exception:
-            pass
+                # SANs
+                sans = []
+                try:
+                    san_ext = cert.extensions.get_extension_for_class(
+                        x509.SubjectAlternativeName)
+                    sans = [str(n.value) for n in san_ext.value]
+                except Exception:
+                    pass
 
-        # SANs
-        sans = []
-        try:
-            san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-            sans = [str(n.value) for n in san_ext.value]
-        except Exception:
-            pass
+                # Algoritmo de firma
+                sig_algo = cert.signature_algorithm_oid.dotted_string
+                try:
+                    sig_algo = cert.signature_hash_algorithm.name
+                except Exception:
+                    pass
 
-        # Algoritmo de firma
-        sig_algo = cert.signature_algorithm_oid.dotted_string
-        try:
-            sig_algo = cert.signature_hash_algorithm.name
-        except Exception:
-            pass
+                # Tipo y tamaño de clave — distinguir RSA vs EC vs DSA
+                pub_key  = cert.public_key()
+                key_size = 0
+                key_type = "unknown"
+                try:
+                    key_size = pub_key.key_size
+                    if isinstance(pub_key, rsa.RSAPublicKey):
+                        key_type = "rsa"
+                    elif isinstance(pub_key, ec.EllipticCurvePublicKey):
+                        key_type = "ec"
+                        # Nombre de curva para info adicional
+                        sig_algo = f"ecdsa ({pub_key.curve.name})"
+                    elif isinstance(pub_key, dsa.DSAPublicKey):
+                        key_type = "dsa"
+                except Exception:
+                    pass
 
-        # Key size
-        key_size = 0
-        try:
-            key_size = cert.public_key().key_size
-        except Exception:
-            pass
+                not_after  = (cert.not_valid_after_utc
+                              if hasattr(cert, "not_valid_after_utc")
+                              else cert.not_valid_after.replace(tzinfo=timezone.utc))
+                not_before = (cert.not_valid_before_utc
+                              if hasattr(cert, "not_valid_before_utc")
+                              else cert.not_valid_before.replace(tzinfo=timezone.utc))
+                days_left  = (not_after - datetime.now(timezone.utc)).days
 
-        not_after  = cert.not_valid_after_utc if hasattr(cert, "not_valid_after_utc") else cert.not_valid_after.replace(tzinfo=timezone.utc)
-        not_before = cert.not_valid_before_utc if hasattr(cert, "not_valid_before_utc") else cert.not_valid_before.replace(tzinfo=timezone.utc)
+                return {
+                    "subject_cn":       subject_cn,
+                    "issuer_cn":        issuer_cn,
+                    "not_before":       not_before.strftime("%Y-%m-%d"),
+                    "not_after":        not_after.strftime("%Y-%m-%d"),
+                    "days_remaining":   days_left,
+                    "serial":           str(cert.serial_number),
+                    "signature_algo":   sig_algo,
+                    "key_size":         key_size,
+                    "key_type":         key_type,
+                    "sans":             sans,
+                    "fingerprint_sha256": cert.fingerprint(hashes.SHA256()).hex(),
+                    "self_signed":      subject_cn == issuer_cn,
+                    "expired":          days_left < 0,
+                }
 
-        days_left = (not_after - datetime.now(timezone.utc)).days
-
-        return {
-            "subject_cn":       subject_cn,
-            "issuer_cn":        issuer_cn,
-            "not_before":       not_before.strftime("%Y-%m-%d"),
-            "not_after":        not_after.strftime("%Y-%m-%d"),
-            "days_remaining":   days_left,
-            "serial":           str(cert.serial_number),
-            "signature_algo":   sig_algo,
-            "key_size":         key_size,
-            "sans":             sans,
-            "fingerprint_sha256": cert.fingerprint(hashes.SHA256()).hex(),
-            "self_signed":      subject_cn == issuer_cn,
-            "expired":          days_left < 0,
-        }
     except Exception as e:
         console.print(f"  [yellow]![/yellow] Error obteniendo certificado: {e}")
         return {}
@@ -250,16 +281,44 @@ def _check_certificate_findings(cert: dict, results: dict):
             "remediation": "Reemitir el certificado con SHA-256 o superior.",
         })
 
-    # Clave pequeña
-    if cert.get("key_size") and cert["key_size"] < 2048:
-        results["findings"].append({
-            "phase":       "SSL/TLS",
-            "title":       f"Clave RSA débil: {cert['key_size']} bits",
-            "description": f"La clave pública del certificado es de {cert['key_size']} bits. Mínimo recomendado: 2048.",
-            "severity":    "HIGH",
-            "cvss":        7.4,
-            "remediation": "Regenerar el certificado con clave RSA de 2048+ bits o curva elíptica (ECDSA P-256).",
-        })
+    # ── Clave débil — lógica diferenciada por tipo de algoritmo ──
+    key_type = cert.get("key_type", "unknown").lower()
+    key_size = cert.get("key_size", 0)
+
+    if key_size and key_type in KEY_MIN_BITS:
+        min_bits = KEY_MIN_BITS[key_type]
+        if key_size < min_bits:
+            if key_type == "rsa":
+                title = f"Clave RSA débil: {key_size} bits"
+                desc  = (
+                    f"La clave RSA del certificado es de {key_size} bits. "
+                    f"El mínimo recomendado para RSA es {min_bits} bits."
+                )
+                rem   = f"Regenerar el certificado con clave RSA de {min_bits}+ bits o migrar a ECDSA P-256."
+            elif key_type == "dsa":
+                title = f"Clave DSA débil: {key_size} bits"
+                desc  = (
+                    f"La clave DSA del certificado es de {key_size} bits. "
+                    f"El mínimo recomendado para DSA es {min_bits} bits."
+                )
+                rem   = f"Regenerar el certificado con clave DSA de {min_bits}+ bits o migrar a ECDSA P-256."
+            else:  # ec — caso muy improbable con curvas estándar
+                title = f"Clave EC débil: {key_size} bits"
+                desc  = (
+                    f"La clave EC del certificado es de {key_size} bits. "
+                    f"El mínimo recomendado es {min_bits} bits (curva P-224 o superior)."
+                )
+                rem   = "Regenerar el certificado con ECDSA P-256 o superior."
+
+            results["findings"].append({
+                "phase":       "SSL/TLS",
+                "title":       title,
+                "description": desc,
+                "severity":    "HIGH",
+                "cvss":        7.4,
+                "remediation": rem,
+            })
+        # ECDSA P-256 (256 bits) >= 224 → no genera hallazgo
 
 
 def _run_sslyze(host: str, port: int) -> dict:
@@ -322,7 +381,6 @@ def _run_sslyze(host: str, port: int) -> dict:
                 except Exception:
                     pass
 
-            # Vulnerabilidades específicas
             _extract_sslyze_vulns(result, vulns)
 
         return {"protocols": protocols, "ciphers": ciphers, "vulns": vulns, "ocsp_stapling": False}
@@ -335,10 +393,8 @@ def _run_sslyze(host: str, port: int) -> dict:
 
 
 def _extract_sslyze_vulns(result, vulns: list):
-    """Extrae vulnerabilidades conocidas del resultado sslyze."""
     try:
         from sslyze.plugins.scan_commands import ScanCommand
-        # Heartbleed
         hb = getattr(result.scan_result, ScanCommand.HEARTBLEED.value, None)
         if hb and getattr(hb, "is_vulnerable_to_heartbleed", False):
             vulns.append("HEARTBLEED")
@@ -346,7 +402,6 @@ def _extract_sslyze_vulns(result, vulns: list):
         pass
     try:
         from sslyze.plugins.scan_commands import ScanCommand
-        # ROBOT
         rb = getattr(result.scan_result, ScanCommand.ROBOT.value, None)
         if rb and "VULNERABLE" in str(getattr(rb, "robot_result", "")):
             vulns.append("ROBOT")
@@ -356,7 +411,6 @@ def _extract_sslyze_vulns(result, vulns: list):
 
 def _check_protocol_findings(sslyze_data: dict, results: dict):
     protocols = sslyze_data.get("protocols", {})
-
     for proto in INSECURE_PROTOCOLS:
         if protocols.get(proto):
             results["findings"].append({
@@ -398,7 +452,6 @@ def _check_protocol_findings(sslyze_data: dict, results: dict):
 
 
 def _basic_protocol_check(host: str, port: int, timeout: int) -> dict:
-    """Fallback básico si sslyze no está disponible."""
     protocols = {}
     proto_map = {
         "TLSv1":   ssl.TLSVersion.TLSv1   if hasattr(ssl.TLSVersion, "TLSv1")   else None,
@@ -411,8 +464,8 @@ def _basic_protocol_check(host: str, port: int, timeout: int) -> dict:
             continue
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ctx.check_hostname = False
-            ctx.verify_mode    = ssl.CERT_NONE
+            ctx.check_hostname  = False
+            ctx.verify_mode     = ssl.CERT_NONE
             ctx.minimum_version = version
             ctx.maximum_version = version
             with socket.create_connection((host, port), timeout=timeout) as sock:
@@ -425,18 +478,14 @@ def _basic_protocol_check(host: str, port: int, timeout: int) -> dict:
 
 def _run_nmap_ssl(host: str, port: int) -> dict:
     try:
-        cmd = [
-            "nmap", "--script", "ssl-enum-ciphers",
-            "-p", str(port), host,
-            "--script-timeout", "30",
-            "-oN", "-"
-        ]
+        cmd  = ["nmap", "--script", "ssl-enum-ciphers", "-p", str(port), host,
+                "--script-timeout", "30", "-oN", "-"]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         output = proc.stdout
 
-        data = {"raw": output, "ciphers": [], "grade": ""}
-
+        data         = {"raw": output, "ciphers": [], "grade": ""}
         current_proto = ""
+
         for line in output.splitlines():
             line = line.strip()
             if line.startswith("TLS") or line.startswith("SSL"):
@@ -450,6 +499,7 @@ def _run_nmap_ssl(host: str, port: int) -> dict:
                     data["grade"] = match.group(1)
 
         return data
+
     except subprocess.TimeoutExpired:
         console.print("  [yellow]![/yellow] nmap ssl-enum-ciphers: timeout")
         return {}

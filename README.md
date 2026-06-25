@@ -23,6 +23,7 @@ Casos de uso
 - Validación de exposición de activos
 - Preparación de pentests
 - Monitorización básica de superficie externa
+- Informes alineados con MITRE ATT&CK para analistas y CISO
 
 ------------------------------------------------------------
 
@@ -44,10 +45,12 @@ El objetivo no es la explotación, sino:
 
 Filosofía de diseño
 
-- Modularidad
-- Pipeline por fases
-- Dependencias desacopladas
-- Uso de herramientas estándar (nmap, testssl.sh)
+- Modularidad — cada fase es un módulo independiente
+- Scope awareness — separación estricta endpoint vs dominio raíz
+- Trazabilidad — Run ID, log completo y metadatos por ejecución
+- Resiliencia — fallback automático NVD → CIRCL Vulnerability-Lookup
+- Criterio conservador en MITRE — precisión antes que cobertura
+- Sin dependencias de APIs externas innecesarias
 - Enfoque práctico orientado a pentesting real
 
 ------------------------------------------------------------
@@ -57,7 +60,7 @@ Arquitectura
 El flujo sigue un modelo en pipeline:
 
 ```
-Input → Reconocimiento → Enumeración → Análisis → WAF/CDN → Scoring → Reporte
+Input → Reconocimiento → Enumeración → Análisis → WAF/CDN → CVEs → MITRE → Reporte
 ```
 
 Cada fase es independiente pero encadenada, permitiendo: modularidad, extensibilidad y mantenimiento sencillo
@@ -66,19 +69,19 @@ Cada fase es independiente pero encadenada, permitiendo: modularidad, extensibil
 
 Características
 
-- **OSINT:** WHOIS, DNS, AXFR, ASN/BGP, crt.sh
-- **Integración Shodan** (opcional vía API key)
-- **Integración Leak-Lookup** (opcional vía API key)
-- **Enumeración de subdominios** y hosts activos HTTP/HTTPS
-- **Fingerprinting de tecnologías**
-- **Detección de versiones** con nmap -sV ← nuevo en v1.1.2
-- **Análisis SSL/TLS:** sslyze + nmap ssl-enum-ciphers
-- **Cabeceras HTTP y CSP**
-- **HSTS**
-- **Detección WAF/CDN:** Cloudflare, AWS WAF/CloudFront, Azure Front Door/WAF, Akamai, Fastly, Sucuri, Imperva
-- **Correlación CVEs** (NVD/NIST) basada en versiones confirmadas con retry automático y warning de disponibilidad
-- **Scoring por CVSS**
-- **Generación de informe PDF** con versión de herramienta en portada y pie
+- **OSINT** — WHOIS, DNS, AXFR, ASN/BGP, crt.sh con separación automática endpoint/dominio raíz
+- **Shodan** (opcional vía API key)
+- **Leak-Lookup** (opcional vía API key)
+- **Enumeración** — subdominios, hosts activos, fingerprinting con extracción de versión confirmada
+- **nmap -sV** — detección de versiones de servicios expuestos con contador diferenciado
+- **SSL/TLS** — análisis nativo + nmap ssl-enum-ciphers, diferenciación RSA/ECDSA/DSA
+- **Cabeceras HTTP, CSP y HSTS**
+- **WAF/CDN** — Cloudflare, AWS WAF/CloudFront, Azure Front Door/WAF, Akamai, Fastly, Sucuri, Imperva
+- **CVEs** — NVD/NIST con fallback automático a CIRCL Vulnerability-Lookup, solo versión confirmada
+- **MITRE ATT&CK** — táctica + técnica + sub-técnica, mappings conservadores, sin API externa
+- **Separación endpoint / dominio raíz** — SPF, DMARC y WHOIS nunca afectan el scoring principal
+- **Trazabilidad completa** — Run ID, log detallado, metadatos de ejecución en PDF
+- **Informe PDF** — paginación inteligente, wrap correcto, riesgo global real, sección metadatos al final
 
 ------------------------------------------------------------
 
@@ -98,6 +101,7 @@ recon-cli/
 │   ├── headers.py       Cabeceras HTTP, CSP, HSTS
 │   ├── waf_cdn.py       Detección WAF/CDN (Cloudflare, AWS, Azure...)
 │   └── cves.py          CVEs (NVD/NIST) con retry y warning
+│   └── mitre.py         Correlación MITRE ATT&CK (mappings conservadores)
 ├── report/
 │   └── pdf_gen.py       Generación de informe PDF
 ├── reports/             Directorio de salida (no versionado)
@@ -197,14 +201,14 @@ Opciones disponibles:
 
 | Opción | Descripción |
 |---|---|
-| `--scope [blackbox\|greybox]` | Tipo de análisis (default: blackbox) |
-| `--skip-leaks` | Omitir consulta a Leak-Lookup |
-| `--skip-shodan` | Omitir consulta a Shodan |
-| `--skip-ssl` | Omitir análisis SSL/TLS |
+| `--scope [blackbox\|greybox]` | Tipo de análisis en el informe (informativo, default: blackbox) |
+| `--skip-leaks` | Omitir Leak-Lookup |
+| `--skip-shodan` | Omitir Shodan |
+| `--skip-ssl` | Omitir SSL/TLS |
 | `--skip-waf` | Omitir detección WAF/CDN |
-| `--skip-cves` | Omitir búsqueda de CVEs |
-| `--output <ruta.pdf>` | Ruta del informe PDF de salida |
-| `--verbose / -v` | Output detallado por fase |
+| `--skip-cves` | Omitir CVEs |
+| `--output <ruta.pdf>` | Ruta del informe PDF |
+| `--verbose / -v` | Output detallado |
 
 > **Nota sobre `--scope`:** actualmente el parámetro es **informativo** — aparece en el banner del terminal y en la portada del informe PDF, pero no activa ni desactiva ningún módulo ni cambia la lógica de análisis. La diferenciación funcional entre blackbox y greybox se implementará en la próxima versión con el módulo de análisis de APIs, donde greybox habilitará el uso de credenciales y tokens.
 
@@ -267,6 +271,29 @@ Proveedores: Cloudflare, AWS WAF, AWS CloudFront, Azure Front Door, Azure Applic
 
 ------------------------------------------------------------
 
+Separación endpoint vs dominio raíz
+
+recon-cli detecta automáticamente el dominio raíz mediante `tldextract` y separa los hallazgos en dos categorías:
+
+- **Hallazgos de seguridad** — relativos al endpoint, contribuyen al scoring CVSS y al riesgo global
+- **Sección "Análisis del Dominio Raíz"** — SPF, DMARC, WHOIS/ASN en sección separada, sin afectar el scoring
+
+Esta separación es **siempre activa**, independientemente de si el target es un subdominio o el dominio raíz directamente. SPF y DMARC son configuraciones de correo, no de la aplicación web auditada, y nunca deben inflar el riesgo global de un análisis de superficie web.
+
+Ejemplo:
+
+```
+Target: studio.empresa.cat
+  → Hallazgos endpoint: SSL/TLS, cabeceras, WAF, CVEs
+  → Dominio raíz: SPF/DMARC de empresa.cat (sección separada)
+
+Target: empresa.cat
+  → Hallazgos endpoint: SSL/TLS, cabeceras, WAF, CVEs
+  → Dominio raíz: SPF/DMARC de empresa.cat (sección separada)
+```
+
+------------------------------------------------------------
+
 Output
 
 - **Informe PDF** en `reports/` con versión de herramienta en portada y pie de página
@@ -274,6 +301,19 @@ Output
 - **Resumen de hallazgos** por severidad (CRITICAL / HIGH / MEDIUM / LOW / INFO)
 - **Scoring CVSS** consolidado
 - **Propuestas de mitigación** priorizadas
+
+------------------------------------------------------------
+
+Trazabilidad de ejecuciones
+
+Cada ejecución genera un **Run ID** único con formato `YYYYMMDD-HHMMSS-XXXXXXXX` visible en:
+
+- El panel de inicio en consola
+- La portada del PDF
+- La sección final "Metadatos de Ejecución" del PDF
+- El fichero `.log` asociado
+
+El `.log` contiene la salida completa y detallada de todas las fases — equivalente exacto a lo que el usuario ve en pantalla durante la ejecución — incluyendo tecnologías detectadas, consultas CVE, correlación MITRE y resumen final.
 
 ------------------------------------------------------------
 
@@ -286,6 +326,73 @@ Enfoque **BLACKBOX** basado en reconocimiento pasivo o de bajo impacto.
 **No incluye:** exploits, payloads maliciosos, fuerza bruta, acceso no autorizado, movimiento lateral ni escalada de privilegios.
 
 > Uso únicamente sobre activos propios o con autorización explícita.
+
+------------------------------------------------------------
+
+Resiliencia CVEs — Fallback NVD → CIRCL
+
+Cuando NVD/NIST falla repetidamente (timeout, HTTP 503), recon-cli activa automáticamente un fallback a **CIRCL Vulnerability-Lookup** (`vulnerability.circl.lu`):
+
+```
+NVD/NIST
+↓ 3 errores consecutivos (timeout / 5xx)
+CIRCL Vulnerability-Lookup — gratuito, sin autenticación
+↓
+continuar análisis sin interrupción
+```
+
+Solo se envían a correlación CVE los productos con **versión confirmada**. Tecnologías detectadas sin versión (jQuery sin versión, Bootstrap sin versión) quedan excluidas para evitar falsos positivos.
+
+**Por qué CIRCL y no otras alternativas:**
+
+| Fuente | Búsqueda por producto | Sin auth | Fiabilidad | Decisión |
+|---|---|---|---|---|
+| NVD/NIST | ✓ keywordSearch | ✓ (con key opcional) | Media (timeouts frecuentes) | Primaria |
+| CIRCL Vulnerability-Lookup | ✓ /api/search/{vendor}/{product} | ✓ | Alta | Fallback |
+| MITRE CVE Services | ✗ No soporta búsqueda por producto | ✓ | — | Descartada (devuelve HTTP 400) |
+| CVE.org | ✗ Solo lookup por CVE-ID | ✓ | Alta | No apta para búsqueda |
+
+------------------------------------------------------------
+
+Correlación MITRE ATT&CK
+
+Mapeo automático de hallazgos con criterio conservador — se prefieren pocos mappings sólidos antes que muchos discutibles. Se asigna sub-técnica solo cuando la correspondencia es directa y justificable.
+
+El informe incluye resumen en el ejecutivo, badge por hallazgo y sección dedicada al final.
+
+------------------------------------------------------------
+
+Estructura del informe PDF
+
+| # | Sección | Siempre presente |
+|---|---|---|
+| 1 | Resumen Ejecutivo | ✓ |
+| 2 | Alcance y Metodología | ✓ |
+| 3 | Hallazgos de Seguridad | ✓ |
+| 4 | Análisis SSL/TLS | ✓ |
+| 5 | Cabeceras HTTP | ✓ |
+| 6 | Detección WAF/CDN | ✓ |
+| 7 | OSINT & Reconocimiento | ✓ |
+| 8 | CVEs Identificados | ✓ (placeholder si no hay resultados) |
+| 9 | Tabla CVSS Consolidada | Solo si hay hallazgos con CVSS |
+| 10 | Análisis del Dominio Raíz | Solo si hay hallazgos de dominio raíz |
+| 11 | Correlación MITRE ATT&CK | Solo si hay correlaciones |
+| 12 | Propuestas de Mitigación | ✓ |
+| 13 | Metadatos de Ejecución | ✓ |
+
+------------------------------------------------------------
+
+Cálculo de riesgo global
+
+El riesgo global es la **severidad más alta encontrada entre los hallazgos del endpoint**, sin ponderaciones. SPF, DMARC y hallazgos de dominio raíz no participan en este cálculo.
+
+| Severidad más alta | Riesgo global |
+|---|---|
+| CRITICAL | CRÍTICO |
+| HIGH | ALTO |
+| MEDIUM | MEDIO |
+| LOW | BAJO |
+| Solo INFO | INFORMATIVO |
 
 ------------------------------------------------------------
 
@@ -375,23 +482,31 @@ NVD saturado o con timeouts — reintentar más tarde o añadir NVD_API_KEY en .
 
 Roadmap
 
-- [x] OSINT & Reconocimiento
-- [x] Integración Shodan
-- [x] Integración Leak-Lookup
-- [x] Enumeración de subdominios
-- [x] Análisis SSL/TLS
-- [x] Cabeceras HTTP & CSP
-- [x] Detección WAF/CDN — Cloudflare + AWS ← v1.1.0
-- [x] Detección WAF/CDN — Azure Front Door + Azure WAF
-- [x] Detección de versiones con nmap -sV
-- [x] Resiliencia NVD — timeout, retries, warning en PDF
-- [x] Versión de herramienta en informe PDF
-- [ ] API discovery greybox (endpoints, Swagger/OpenAPI, GraphQL, tokens)
+- [x] OSINT, Shodan, Leak-Lookup, Enumeración, SSL/TLS, Cabeceras HTTP
+- [x] WAF/CDN — Cloudflare, AWS, Azure ← v1.1.0
+- [x] nmap -sV para detección de versiones ← v1.1.0
+- [x] CVEs solo con versión confirmada ← v1.1.3
+- [x] Versión dinámica en PDF ← v1.1.4
+- [x] Portada limpia, KPIs en Resumen Ejecutivo ← v1.1.5
+- [x] MITRE ATT&CK con mappings conservadores ← v1.1.6
+- [x] Separación estricta endpoint vs dominio raíz ← v1.1.6
+- [x] SPF/DMARC siempre fuera del scoring principal ← v1.1.6
+- [x] Eliminados hallazgos de emails WHOIS ← v1.1.6
+- [x] Fallback CVE: NVD → CIRCL Vulnerability-Lookup ← v1.1.6
+- [x] Riesgo global = severidad más alta del endpoint ← v1.1.6
+- [x] Corrección falso positivo ECDSA P-256 ← v1.1.6
+- [x] Diferenciación RSA / ECDSA / DSA en SSL/TLS ← v1.1.6
+- [x] Fix versiones heredadas desde ?ver= de WordPress ← v1.1.6
+- [x] Contador nmap diferenciado (abiertos / con versión / sin versión) ← v1.1.6
+- [x] Run ID único por ejecución ← v1.1.6
+- [x] Log completo de ejecución (console compartido) ← v1.1.6
+- [x] Sección "Metadatos de Ejecución" al final del PDF ← v1.1.6
+- [x] Paginación inteligente y wrap correcto en tablas ← v1.1.6
+- [x] Numeración y estructura PDF estabilizadas ← v1.1.6
+- [ ] API discovery greybox (Swagger/OpenAPI, GraphQL, tokens)
 - [ ] Diferenciación funcional blackbox vs greybox
 - [ ] Integración con nuclei
-- [ ] Mejora de correlación CVE (version-aware)
-- [ ] Correlación con MITRE ATT&CK
-- [ ] Export JSON
+- [ ] Export JSON / STIX
 - [ ] Integración SIEM
 
 ------------------------------------------------------------
@@ -400,9 +515,12 @@ Roadmap
 
 | Versión | Cambios principales |
 |---|---|
+| v1.1.6 | Trazabilidad (Run ID, log, metadatos PDF), fix ECDSA, separación estricta dominio raíz, fix versiones WordPress, paginación inteligente, MITRE ATT&CK |
+| v1.1.5 | Portada limpia, KPIs en ejecutivo, cabeceras de tabla legibles |
+| v1.1.4 | version.py fuente única, fix portada |
+| v1.1.3 | CVEs con versión confirmada, fix WHOIS, fix hexval |
 | v1.1.2 | nmap -sV, Azure WAF/CDN, resiliencia NVD, correlación CVE basada en versiones confirmadas |
 | v1.1.0 | Módulo WAF/CDN (Cloudflare + AWS), recon-exec.sh con validación |
-| v1.0.7 | Estabilización, fix sslyze Python 3.13, fix urllib3 |
 | v1.0.0 | Release inicial |
 
 ------------------------------------------------------------

@@ -48,6 +48,8 @@ UNSAFE_CSP_DIRECTIVES = ["unsafe-inline", "unsafe-eval", "unsafe-hashes", "*"]
 
 
 def run_headers_analysis(target: str, target_info: dict, config: dict) -> dict:
+    global console
+    console = config.get("console") or console
     results = {
         "headers_present":  {},
         "headers_missing":  [],
