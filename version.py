@@ -4,4 +4,4 @@
 #  Actualizar SOLO aquí en cada release.
 # ─────────────────────────────────────────────────────────────
 
-__version__ = "v1.1.3"
+__version__ = "v1.1.6"

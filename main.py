@@ -5,6 +5,7 @@
 # ─────────────────────────────────────────────────────────────
 
 import sys
+import uuid
 import click
 from datetime import datetime
 from rich.console import Console
@@ -22,9 +23,10 @@ from modules.ssl_tls import run_ssl_analysis
 from modules.headers import run_headers_analysis
 from modules.waf_cdn import run_waf_cdn
 from modules.cves import run_cve_lookup
+from modules.mitre import enrich_findings_with_mitre, get_unique_techniques
 from report.pdf_gen import generate_report
 
-console = Console()
+console = Console(record=True)
 
 BANNER_TEMPLATE = """
 ██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗      ██████╗██╗     ██╗
@@ -64,12 +66,15 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
     """
 
     start_time = datetime.now()
+    run_id     = f"{start_time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
+    command    = " ".join(sys.argv)
 
     console.print(f"[bold cyan]{BANNER}[/bold cyan]")
     console.print(Panel.fit(
         f"[bold]Target:[/bold] [green]{target}[/green]  |  "
         f"[bold]Scope:[/bold] [yellow]{scope.upper()}[/yellow]  |  "
-        f"[bold]Inicio:[/bold] {start_time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"[bold]Inicio:[/bold] {start_time.strftime('%Y-%m-%d %H:%M:%S')}  |  "
+        f"[bold]Run ID:[/bold] [magenta]{run_id}[/magenta]",
         title=f"[bold white]recon-cli {__version__}[/bold white]",
         border_style="cyan"
     ))
@@ -78,6 +83,9 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
     config["verbose"]    = verbose
     config["scope"]      = scope
     config["start_time"] = start_time
+    config["run_id"]     = run_id
+    config["command"]    = command
+    config["console"]    = console   # console compartido con record=True
 
     target_info = validate_target(target)
     if not target_info:
@@ -87,19 +95,22 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
     console.print(f"\n[cyan][*][/cyan] Tipo de target: [bold]{target_info['type'].upper()}[/bold]")
 
     results = {
-        "target":      target,
-        "target_info": target_info,
-        "scope":       scope,
-        "start_time":  start_time,
-        "osint":       {},
-        "shodan":      {},
-        "leaks":       {},
-        "enumeration": {},
-        "ssl_tls":     {},
-        "headers":     {},
-        "waf_cdn":     {},
-        "cves":        [],
-        "findings":    [],
+        "target":               target,
+        "target_info":          target_info,
+        "scope":                scope,
+        "start_time":           start_time,
+        "run_id":               run_id,
+        "command":              command,
+        "osint":                {},
+        "shodan":               {},
+        "leaks":                {},
+        "enumeration":          {},
+        "ssl_tls":              {},
+        "headers":              {},
+        "waf_cdn":              {},
+        "cves":                 [],
+        "findings":             [],
+        "root_domain_findings": [],
     }
 
     # ── FASE 1: OSINT ─────────────────────────────────────────
@@ -149,27 +160,54 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
     else:
         _skip_phase("8", "CVEs", True, False)
 
-    # ── Propagar estado NVD al results para el PDF ───────────
+    # ── Propagar estado CVE al results para el PDF ───────────
     results["config_snapshot"] = {
-        "nvd_status": config.get("nvd_status", ""),
-        "nvd_errors": config.get("nvd_errors", []),
+        "nvd_status":        config.get("nvd_status", ""),
+        "nvd_errors":        config.get("nvd_errors", []),
+        "cve_source":        config.get("cve_source", "NVD/NIST"),
+        "nvd_fallback_used": config.get("nvd_fallback_used", False),
+        "nvd_fallback_reason": config.get("nvd_fallback_reason", ""),
     }
 
     # ── Consolidar hallazgos ──────────────────────────────────
-    results["findings"] = _consolidate_findings(results)
+    all_findings = _consolidate_findings(results)
+    results["root_domain_findings"] = [f for f in all_findings if f.get("scope") == "root_domain"]
+    results["findings"]             = [f for f in all_findings if f.get("scope") != "root_domain"]
+
+    if results["root_domain_findings"]:
+        root = target_info.get("root_domain", "")
+        console.print(
+            f"  [cyan][*][/cyan] {len(results['root_domain_findings'])} oportunidad(es) de mejora "
+            f"del dominio raíz [bold]{root}[/bold] → sección separada en el informe"
+        )
+
     results["end_time"] = datetime.now()
     results["duration"] = results["end_time"] - start_time
 
     _print_summary(results)
 
-    # ── FASE 9: PDF ───────────────────────────────────────────
-    _phase_header("9", "Generando Informe PDF")
+    # ── Correlación MITRE ATT&CK ──────────────────────────────
+    _phase_header("9", "Correlación MITRE ATT&CK")
+    results["findings"] = enrich_findings_with_mitre(results["findings"], config)
+    results["mitre_techniques"] = get_unique_techniques(results["findings"])
+    console.print(
+        f"  [green]✓[/green] {len(results['mitre_techniques'])} técnica(s) únicas identificadas"
+    )
+
+    # ── FASE 10: PDF ──────────────────────────────────────────
+    _phase_header("10", "Generando Informe PDF")
     pdf_path = output or (
         f"{config.get('REPORT_OUTPUT_DIR','./reports/')}"
         f"{target.replace('.','_')}_{start_time.strftime('%Y%m%d_%H%M%S')}.pdf"
     )
     generate_report(results, pdf_path, config)
     console.print(f"\n[bold green][✓][/bold green] Informe: [underline]{pdf_path}[/underline]")
+
+    # ── Log TXT — salida completa de consola ──────────────────
+    log_path = pdf_path.replace(".pdf", ".log")
+    console.save_text(log_path, clear=False)
+    console.print(f"[bold green][✓][/bold green] Log:     [underline]{log_path}[/underline]")
+
     console.print(f"[bold green][✓][/bold green] Completado en {results['duration'].seconds}s\n")
 
 
