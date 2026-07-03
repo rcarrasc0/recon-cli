@@ -1,7 +1,8 @@
 # ─────────────────────────────────────────────────────────────
 #  recon-cli · version.py
-#  Fuente única de verdad para la versión.
-#  Actualizar SOLO aquí en cada release.
+#  GENERADO AUTOMÁTICAMENTE por GitHub Actions al publicar
+#  un Release. NO EDITAR A MANO — se sobreescribe en cada
+#  release (workflow: .github/workflows/update-version.yml).
 # ─────────────────────────────────────────────────────────────
 
-__version__ = "v1.1.6"
+__version__ = "v1.2.0-test"
