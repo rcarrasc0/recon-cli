@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────
-#  recon-cli · main.py
+#  recon-cli · main.py  v1.2.0
 #  Entry point principal. Orquesta todas las fases del análisis.
+#  v1.2.0: modo greybox — API audit + SSO/VALid2 audit
 # ─────────────────────────────────────────────────────────────
 
 import sys
@@ -53,7 +54,18 @@ BANNER = BANNER_TEMPLATE.format(__version__=__version__)
 @click.option("--skip-cves",   is_flag=True, default=False, help="Omitir búsqueda de CVEs")
 @click.option("--output", "-o", default=None, help="Ruta del PDF de salida")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Output detallado")
-def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, output, verbose):
+# ── Opciones greybox ──────────────────────────────────────────
+@click.option("--token", default=None,
+              help="Bearer token para modo greybox (ej: 'Bearer eyJ...')")
+@click.option("--api-doc", default=None, multiple=True,
+              help="Ruta a colección Postman (.json) u OpenAPI (.yaml/.json). Repetible.")
+@click.option("--env-file", default=None,
+              help="Ruta al entorno Postman (.json) con variables base_url, IDs, etc.")
+@click.option("--greybox-profile", default="normal", show_default=True,
+              type=click.Choice(["normal", "aggressive"]),
+              help="Perfil de auditoría greybox: normal (por defecto) o aggressive")
+def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves,
+        output, verbose, token, api_doc, env_file, greybox_profile):
     """
     recon-cli — Framework de reconocimiento y análisis de seguridad.
 
@@ -62,7 +74,9 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
     Ejemplos:\n
       ./recon-exec.sh ejemplo.com\n
       ./recon-exec.sh 1.2.3.4 --skip-leaks --verbose\n
-      ./recon-exec.sh ejemplo.com --scope blackbox --output ./reports/out.pdf
+      ./recon-exec.sh ejemplo.com --scope greybox --token "Bearer eyJ..."\n
+      ./recon-exec.sh ejemplo.com --scope greybox --api-doc ./postman.json\n
+      ./recon-exec.sh ejemplo.com --scope greybox --api-doc ./postman.json --api-doc ./openapi.yaml --env-file ./env_pre.json
     """
 
     start_time = datetime.now()
@@ -86,6 +100,33 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
     config["run_id"]     = run_id
     config["command"]    = command
     config["console"]    = console   # console compartido con record=True
+
+    # ── Configuración greybox — CLI tiene prioridad sobre .env ──
+    if token:
+        config["greybox_token"]          = token
+    elif config.get("GREYBOX_TOKEN"):
+        config["greybox_token"]          = config["GREYBOX_TOKEN"]
+
+    if api_doc:
+        config["greybox_api_docs"]       = list(api_doc)
+    elif config.get("GREYBOX_API_DOC"):
+        config["greybox_api_docs"]       = [config["GREYBOX_API_DOC"]]
+
+    if env_file:
+        config["greybox_env_file"]       = env_file
+    elif config.get("GREYBOX_ENV_FILE"):
+        config["greybox_env_file"]       = config["GREYBOX_ENV_FILE"]
+
+    # Client credentials desde .env (si no se informó token directo)
+    if not config.get("greybox_token"):
+        if config.get("GREYBOX_CLIENT_ID"):
+            config["greybox_client_id"]      = config["GREYBOX_CLIENT_ID"]
+        if config.get("GREYBOX_CLIENT_SECRET"):
+            config["greybox_client_secret"]  = config["GREYBOX_CLIENT_SECRET"]
+        if config.get("GREYBOX_TOKEN_ENDPOINT"):
+            config["greybox_token_endpoint"] = config["GREYBOX_TOKEN_ENDPOINT"]
+
+    config["greybox_profile"] = greybox_profile or config.get("GREYBOX_PROFILE", "normal")
 
     target_info = validate_target(target)
     if not target_info:
@@ -111,6 +152,7 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
         "cves":                 [],
         "findings":             [],
         "root_domain_findings": [],
+        "greybox":              {},
     }
 
     # ── FASE 1: OSINT ─────────────────────────────────────────
@@ -150,8 +192,12 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
     if not skip_waf:
         _phase_header("7", "Detección WAF/CDN")
         results["waf_cdn"] = run_waf_cdn(target, target_info, config)
+        # Propagar detección de WAF a config para que el spider ajuste timeouts
+        waf_providers = results["waf_cdn"].get("detected", [])
+        config["waf_detected"] = bool(waf_providers)
     else:
         _skip_phase("7", "WAF/CDN", True, False)
+        config["waf_detected"] = False
 
     # ── FASE 8: CVEs ──────────────────────────────────────────
     if not skip_cves:
@@ -162,10 +208,10 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
 
     # ── Propagar estado CVE al results para el PDF ───────────
     results["config_snapshot"] = {
-        "nvd_status":        config.get("nvd_status", ""),
-        "nvd_errors":        config.get("nvd_errors", []),
-        "cve_source":        config.get("cve_source", "NVD/NIST"),
-        "nvd_fallback_used": config.get("nvd_fallback_used", False),
+        "nvd_status":          config.get("nvd_status", ""),
+        "nvd_errors":          config.get("nvd_errors", []),
+        "cve_source":          config.get("cve_source", "NVD/NIST"),
+        "nvd_fallback_used":   config.get("nvd_fallback_used", False),
         "nvd_fallback_reason": config.get("nvd_fallback_reason", ""),
     }
 
@@ -181,12 +227,12 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
             f"del dominio raíz [bold]{root}[/bold] → sección separada en el informe"
         )
 
-    results["end_time"] = datetime.now()
+    results["end_time"] = datetime.now()  # provisional para el PDF — se recalcula al final
     results["duration"] = results["end_time"] - start_time
 
     _print_summary(results)
 
-    # ── Correlación MITRE ATT&CK ──────────────────────────────
+    # ── FASE 9: Correlación MITRE ATT&CK ─────────────────────
     _phase_header("9", "Correlación MITRE ATT&CK")
     results["findings"] = enrich_findings_with_mitre(results["findings"], config)
     results["mitre_techniques"] = get_unique_techniques(results["findings"])
@@ -194,21 +240,52 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves, o
         f"  [green]✓[/green] {len(results['mitre_techniques'])} técnica(s) únicas identificadas"
     )
 
-    # ── FASE 10: PDF ──────────────────────────────────────────
-    _phase_header("10", "Generando Informe PDF")
+    # Nombre base unificado: target_runid — todos los artefactos comparten prefijo
+    # Se construye aquí para que greybox.py pueda usarlo en los JSON exports
+    safe_target = target.replace(".", "_").replace("-", "_")
+    base_name   = f"{safe_target}_{run_id}"
+    config["base_name"]  = base_name
+    config["report_dir"] = config.get("REPORT_OUTPUT_DIR", "./reports/")
+
+    # ── FASE 10: Greybox (solo si --scope greybox) ───────────
+    if scope == "greybox":
+        _phase_header("10", "Análisis Greybox")
+        from modules.greybox import run_greybox
+        greybox_results = run_greybox(target, target_info, config)
+        results["greybox"] = greybox_results
+
+        # Incorporar hallazgos greybox al pipeline principal
+        gb_findings = greybox_results.get("findings", [])
+        if gb_findings:
+            results["findings"].extend(gb_findings)
+            results["findings"] = enrich_findings_with_mitre(results["findings"], config)
+            results["mitre_techniques"] = get_unique_techniques(results["findings"])
+            console.print(
+                f"  [green]✓[/green] {len(gb_findings)} hallazgo(s) greybox incorporados"
+            )
+
+    # ── FASE 11 (o 10 en blackbox): PDF ──────────────────────
+    pdf_phase = "11" if scope == "greybox" else "10"
+    _phase_header(pdf_phase, "Generando Informe PDF")
+
     pdf_path = output or (
-        f"{config.get('REPORT_OUTPUT_DIR','./reports/')}"
-        f"{target.replace('.','_')}_{start_time.strftime('%Y%m%d_%H%M%S')}.pdf"
+        f"{config['report_dir']}{base_name}.pdf"
     )
     generate_report(results, pdf_path, config)
     console.print(f"\n[bold green][✓][/bold green] Informe: [underline]{pdf_path}[/underline]")
 
-    # ── Log TXT — salida completa de consola ──────────────────
-    log_path = pdf_path.replace(".pdf", ".log")
+    # ── Duración real — desde inicio hasta fin del PDF ────────
+    end_time = datetime.now()
+    duration = end_time - start_time
+    results["end_time"] = end_time
+    results["duration"] = duration
+
+    console.print(f"[bold green][✓][/bold green] Completado en {duration.seconds}s\n")
+
+    # ── Log TXT — al final del todo para capturar todas las líneas ──
+    log_path = f"{config['report_dir']}{base_name}.log"
     console.save_text(log_path, clear=False)
     console.print(f"[bold green][✓][/bold green] Log:     [underline]{log_path}[/underline]")
-
-    console.print(f"[bold green][✓][/bold green] Completado en {results['duration'].seconds}s\n")
 
 
 def _phase_header(num, name):

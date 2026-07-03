@@ -2,8 +2,7 @@
 # ─────────────────────────────────────────────────────────────
 #  recon-cli · config.py
 #  Carga .env, valida configuración y clasifica el target.
-#  v1.1.7: extracción de dominio raíz con tldextract para
-#          separar hallazgos de endpoint vs dominio raíz.
+#  v1.2.0: añadidas variables greybox (token, client credentials)
 # ─────────────────────────────────────────────────────────────
 
 import os
@@ -27,19 +26,30 @@ def load_config() -> dict:
     load_dotenv()
 
     config = {
+        # ── APIs externas ─────────────────────────────────────
         "SHODAN_API_KEY":         os.getenv("SHODAN_API_KEY", "").strip(),
         "LEAKLOOKUP_API_KEY":     os.getenv("LEAKLOOKUP_API_KEY", "").strip(),
         "VIRUSTOTAL_API_KEY":     os.getenv("VIRUSTOTAL_API_KEY", "").strip(),
         "SECURITYTRAILS_API_KEY": os.getenv("SECURITYTRAILS_API_KEY", "").strip(),
         "NVD_API_KEY":            os.getenv("NVD_API_KEY", "").strip(),
+        # ── Parámetros de ejecución ───────────────────────────
         "REQUEST_TIMEOUT":        int(os.getenv("REQUEST_TIMEOUT", "10")),
         "MAX_SUBDOMAINS":         int(os.getenv("MAX_SUBDOMAINS", "500")),
         "DNS_THREADS":            int(os.getenv("DNS_THREADS", "20")),
         "NMAP_PORTS":             os.getenv("NMAP_PORTS", "--top-ports 1000"),
         "LOG_LEVEL":              os.getenv("LOG_LEVEL", "INFO"),
+        # ── Informe ───────────────────────────────────────────
         "REPORT_AUTHOR":          os.getenv("REPORT_AUTHOR", "recon-cli"),
         "REPORT_OUTPUT_DIR":      os.getenv("REPORT_OUTPUT_DIR", "./reports/"),
         "REPORT_LOGO_PATH":       os.getenv("REPORT_LOGO_PATH", "").strip(),
+        # ── Greybox (v1.2.0) ──────────────────────────────────
+        "GREYBOX_TOKEN":          os.getenv("GREYBOX_TOKEN", "").strip(),
+        "GREYBOX_CLIENT_ID":      os.getenv("GREYBOX_CLIENT_ID", "").strip(),
+        "GREYBOX_CLIENT_SECRET":  os.getenv("GREYBOX_CLIENT_SECRET", "").strip(),
+        "GREYBOX_TOKEN_ENDPOINT": os.getenv("GREYBOX_TOKEN_ENDPOINT", "").strip(),
+        "GREYBOX_API_DOC":        os.getenv("GREYBOX_API_DOC", "").strip(),
+        "GREYBOX_ENV_FILE":       os.getenv("GREYBOX_ENV_FILE", "").strip(),
+        "GREYBOX_PROFILE":        os.getenv("GREYBOX_PROFILE", "normal").strip(),
     }
 
     os.makedirs(config["REPORT_OUTPUT_DIR"], exist_ok=True)
@@ -83,9 +93,6 @@ def validate_target(target: str) -> dict | None:
         except socket.gaierror:
             console.print(f"[yellow][!][/yellow] No se pudo resolver {target} — continuando sin IPs")
 
-        # Extraer dominio raíz (eTLD+1)
-        # Ej: studio.carteraidcat-pre.aoc.cat → aoc.cat
-        #     example.com                     → example.com
         extracted   = tldextract.extract(target)
         root_domain = f"{extracted.domain}.{extracted.suffix}" if extracted.domain and extracted.suffix else target
         is_subdomain = target != root_domain
