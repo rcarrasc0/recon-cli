@@ -1,0 +1,66 @@
+name: Actualizar version.py al publicar un Release
+
+# Se dispara solo, en dos casos:
+#  1) Al publicar un Release en GitHub (Releases → Draft a new release → Publish)
+#     — el tag que escribes ahí (p.ej. "v1.2.0") es la nueva fuente de verdad.
+#  2) A mano, desde la pestaña "Actions" del repo (botón "Run workflow"),
+#     útil para probarlo sin tener que crear un Release todavía.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión a escribir en version.py (ej. v1.2.0)'
+        required: true
+
+# Necesario para que la Action pueda hacer commit del version.py actualizado.
+# Si el push falla con un error de permisos, revisa:
+# Settings → Actions → General → Workflow permissions → "Read and write permissions"
+permissions:
+  contents: write
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Determinar la versión
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Escribir version.py
+        run: |
+          cat > version.py << 'EOF'
+          # ─────────────────────────────────────────────────────────────
+          #  recon-cli · version.py
+          #  GENERADO AUTOMÁTICAMENTE por GitHub Actions al publicar
+          #  un Release. NO EDITAR A MANO — se sobreescribe en cada
+          #  release (workflow: .github/workflows/update-version.yml).
+          # ─────────────────────────────────────────────────────────────
+
+          __version__ = "PLACEHOLDER"
+          EOF
+          sed -i "s/PLACEHOLDER/${{ steps.ver.outputs.version }}/" version.py
+          cat version.py
+
+      - name: Commit y push si hay cambios
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.py
+          if git diff --cached --quiet; then
+            echo "version.py ya estaba al día, nada que commitear."
+          else
+            git commit -m "chore: version.py -> ${{ steps.ver.outputs.version }} [skip ci]"
+            git push
+          fi
