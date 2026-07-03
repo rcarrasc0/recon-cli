@@ -1,5 +1,5 @@
 name: Actualizar version.py al publicar un Release
-
+ 
 # Se dispara solo, en dos casos:
 #  1) Al publicar un Release en GitHub (Releases → Draft a new release → Publish)
 #     — el tag que escribes ahí (p.ej. "v1.2.0") es la nueva fuente de verdad.
@@ -13,22 +13,22 @@ on:
       version:
         description: 'Versión a escribir en version.py (ej. v1.2.0)'
         required: true
-
+ 
 # Necesario para que la Action pueda hacer commit del version.py actualizado.
 # Si el push falla con un error de permisos, revisa:
 # Settings → Actions → General → Workflow permissions → "Read and write permissions"
 permissions:
   contents: write
-
+ 
 jobs:
   update-version:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout del repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
-
+ 
       - name: Determinar la versión
         id: ver
         run: |
@@ -37,7 +37,7 @@ jobs:
           else
             echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
-
+ 
       - name: Escribir version.py
         run: |
           cat > version.py << 'EOF'
@@ -47,12 +47,12 @@ jobs:
           #  un Release. NO EDITAR A MANO — se sobreescribe en cada
           #  release (workflow: .github/workflows/update-version.yml).
           # ─────────────────────────────────────────────────────────────
-
+ 
           __version__ = "PLACEHOLDER"
           EOF
           sed -i "s/PLACEHOLDER/${{ steps.ver.outputs.version }}/" version.py
           cat version.py
-
+ 
       - name: Commit y push si hay cambios
         run: |
           git config user.name "github-actions[bot]"
