@@ -1,10 +1,25 @@
 name: Actualizar version.py al publicar un Release
- 
-# Se dispara solo, en dos casos:
-#  1) Al publicar un Release en GitHub (Releases → Draft a new release → Publish)
-#     — el tag que escribes ahí (p.ej. "v1.2.0") es la nueva fuente de verdad.
-#  2) A mano, desde la pestaña "Actions" del repo (botón "Run workflow"),
-#     útil para probarlo sin tener que crear un Release todavía.
+
+# ─────────────────────────────────────────────────────────────
+#  FLUJO: un único paso
+#
+#   Releases → "Draft a new release" → escribes el tag (p.ej. "v1.2.0")
+#   → Publish. Nada más — no hace falta ejecutar nada antes.
+#
+#  Por qué hace falta el segundo paso de más abajo ("Mover el tag"):
+#  cuando publicas, GitHub crea el tag apuntando a lo que hubiera en
+#  main EN ESE INSTANTE — así que si version.py no estaba ya
+#  actualizado, el tag nace apuntando al commit VIEJO. Esta Action
+#  corrige version.py con un commit nuevo en main, y ACTO SEGUIDO
+#  mueve el propio tag a ese commit nuevo, para que el ZIP de
+#  "Source code" del Release (que GitHub genera a partir de dónde
+#  apunte el tag, no de main) nazca ya con el contenido correcto.
+#  Todo esto ocurre dentro de la Action — no requiere ningún paso
+#  manual, ni tocar git, ni borrar nada.
+#
+#  El "workflow_dispatch" de abajo es solo para probarlo a mano sin
+#  crear un Release de verdad (como hicimos con "v1.2.0-test").
+# ─────────────────────────────────────────────────────────────
 on:
   release:
     types: [published]
@@ -13,22 +28,22 @@ on:
       version:
         description: 'Versión a escribir en version.py (ej. v1.2.0)'
         required: true
- 
-# Necesario para que la Action pueda hacer commit del version.py actualizado.
-# Si el push falla con un error de permisos, revisa:
+
+# Necesario para que la Action pueda hacer commit del version.py actualizado
+# Y para mover el tag del Release. Si algo falla con un error de permisos:
 # Settings → Actions → General → Workflow permissions → "Read and write permissions"
 permissions:
   contents: write
- 
+
 jobs:
   update-version:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout del repositorio
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           ref: main
- 
+
       - name: Determinar la versión
         id: ver
         run: |
@@ -37,7 +52,7 @@ jobs:
           else
             echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
- 
+
       - name: Escribir version.py
         run: |
           cat > version.py << 'EOF'
@@ -47,20 +62,37 @@ jobs:
           #  un Release. NO EDITAR A MANO — se sobreescribe en cada
           #  release (workflow: .github/workflows/update-version.yml).
           # ─────────────────────────────────────────────────────────────
- 
+
           __version__ = "PLACEHOLDER"
           EOF
           sed -i "s/PLACEHOLDER/${{ steps.ver.outputs.version }}/" version.py
           cat version.py
- 
+
       - name: Commit y push si hay cambios
+        id: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version.py
           if git diff --cached --quiet; then
             echo "version.py ya estaba al día, nada que commitear."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "chore: version.py -> ${{ steps.ver.outputs.version }} [skip ci]"
             git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Mover el tag al commit ya corregido (solo si hizo falta commitear)
+        # Automático, dentro de esta misma Action — no requiere ningún
+        # paso manual tuyo. No borra ni modifica el Release en sí (título,
+        # notas, fecha de publicación quedan intactos): solo actualiza a
+        # qué commit apunta el tag, para que el ZIP de "Source code" del
+        # Release (que GitHub regenera bajo demanda según dónde apunte el
+        # tag en cada momento — no lo cachea para siempre) recoja ya la
+        # versión correcta la próxima vez que alguien lo descargue.
+        if: github.event_name == 'release' && steps.commit.outputs.changed == 'true'
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
