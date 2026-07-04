@@ -1,0 +1,48 @@
+name: Corregir un tag existente (uso puntual)
+
+# Herramienta de un solo uso — no forma parte de la automatización habitual.
+# Mueve un tag YA PUBLICADO al commit actual de main, para que el ZIP de
+# "Source code" de ese Release recoja el version.py ya corregido.
+#
+# No toca el Release en sí: título, notas y fecha de publicación quedan
+# exactamente igual. Solo cambia a qué commit apunta el tag.
+#
+# Requisito: main debe tener YA el version.py correcto antes de lanzar esto
+# (en tu caso ya lo tiene: __version__ = "v1.2.0").
+#
+# Uso: Actions → "Corregir un tag existente (uso puntual)" → Run workflow →
+# escribe el nombre EXACTO del tag (ej. "v1.2.0") → Run workflow.
+#
+# Puedes borrar este fichero en cuanto lo hayas usado — es una herramienta
+# de mantenimiento puntual, no algo que necesites tener siempre en el repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag exacto a mover al HEAD actual de main (ej. v1.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  repoint-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout de main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Mover el tag al commit actual de main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${{ github.event.inputs.tag }}"
+          echo "Commit actual de main:"
+          git rev-parse HEAD
+          echo "Moviendo el tag $TAG a ese commit..."
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
+          echo "Hecho. El tag $TAG ahora apunta al commit de arriba."
