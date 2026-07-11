@@ -60,7 +60,7 @@ API_WORDLIST = [
     "/credential-offer", "/credentials",
     "/api/v1/credential", "/api/v2/credential",
 
-    # Issuance con service_id (plataformas multi-tenant: Namirial, etc.)
+    # Issuance con service_id (típico en plataformas multi-tenant de credenciales verificables)
     "/issuance/api/v1/1/init", "/issuance/api/v1/2/init",
     "/issuance/api/v1/1/status", "/issuance/api/v1/1/credentials",
     "/issuance/api/v2/1/init", "/issuance/api/v2/2/init",
@@ -98,7 +98,7 @@ API_WORDLIST = [
     "/schema", "/schemas", "/api/v1/schema",
     "/api/v1/trust",
 
-    # Tenant / Admin (típico en plataformas multi-tenant como Namirial)
+    # Tenant / Admin (típico en plataformas multi-tenant genéricas)
     "/tenant", "/tenants", "/api/v1/tenant",
     "/admin", "/admin/api", "/api/admin",
     "/api/v1/admin",
@@ -125,8 +125,8 @@ def verify_token(base_url: str, token: str, timeout: int) -> dict:
         base_url,
         f"{base_url.rstrip('/')}/health",
         f"{base_url.rstrip('/')}/api",
-        f"{base_url.rstrip('/')}/issuance/api/v1",
-        f"{base_url.rstrip('/')}/issuance/api/v2/1/status_list",
+        f"{base_url.rstrip('/')}/api/v1",
+        f"{base_url.rstrip('/')}/status",
     ]
 
     try:
@@ -188,9 +188,9 @@ def run_discovery(target: str, target_info: dict, config: dict) -> dict:
 
     base_url = _build_base_url(target, target_info)
     timeout  = config.get("REQUEST_TIMEOUT", 10)
-    token    = config.get("greybox_token", "")
+    token    = config.get("greybox_api_token", "")
     api_docs = config.get("greybox_api_docs", [])   # lista — puede ser vacía
-    env_file = config.get("greybox_env_file", "")
+    env_file = config.get("greybox_api_env_file", "")
 
     # Retrocompatibilidad con clave singular
     if not api_docs and config.get("greybox_api_doc"):
@@ -262,6 +262,66 @@ def run_discovery(target: str, target_info: dict, config: dict) -> dict:
             if new_src not in existing_src:
                 existing_src.append(new_src)
     results["endpoints"] = deduped
+
+    # ── FIX (v1.2.1): propagar intentionally_public por patrón de path ──
+    # La detección de "público por diseño" para endpoints del spider (más
+    # abajo, en _spider) solo se dispara si hay token configurado, porque
+    # compara la respuesta CON token vs. SIN token. Sin token, esa
+    # comparación es imposible y cualquier endpoint que el spider descubra
+    # queda con intentionally_public=False por defecto — aunque responda
+    # 200 sin ninguna credencial, igual que uno con un fallo real de auth.
+    #
+    # Esto genera falsos positivos concretos: p.ej. un endpoint tipo
+    # status_list (público por especificación — cualquier verificador debe
+    # poder consultarlo sin autenticarse) descubierto solo por spider en
+    # una ejecución sin token queda marcado igual que un fallo de control
+    # de acceso real.
+    #
+    # Fix conservador: si la documentación aportada (Postman/OpenAPI) ya
+    # marca un endpoint como público (type "noauth", o detectado con token)
+    # y el spider encuentra OTRA instancia del mismo patrón de path (mismo
+    # método, mismo path salvo un segmento numérico — típico en APIs con
+    # service_id/tenant_id/ID de recurso en la ruta), se propaga
+    # intentionally_public a esa instancia. No se cambia nada cuando no hay
+    # un "hermano" documentado — ahí seguimos sin poder afirmar diseño
+    # intencionado, y se mantiene el comportamiento actual (queda como
+    # posible hallazgo, a revisar manualmente).
+    def _path_template(path: str) -> str:
+        return re.sub(r"/\d+(?=/|$)", "/{id}", path)
+
+    public_templates = {}
+    for ep in results["endpoints"]:
+        # FIX 2 (misma sesión): la condición original excluía por error
+        # cualquier endpoint cuyo "sources" incluyera "spider" — pero eso
+        # también pasa con endpoints SÍ documentados y confirmados públicos
+        # (p.ej. uno que Postman marca noauth y que el spider también
+        # encuentra al rastrear: sources=["postman","spider"]). El filtro
+        # dejaba public_templates vacío en ese caso, justo el escenario que
+        # se quería arreglar. Lo que importa no es de dónde viene el
+        # endpoint, sino si intentionally_public ya es True y de dónde
+        # viene ESE valor concreto — que siempre es de Postman/OpenAPI
+        # (noauth) o de la comparación con-token/sin-token del propio
+        # spider, nunca de esta misma propagación (evita autorreferencia).
+        if ep.get("intentionally_public") and not ep.get("public_inferred_from"):
+            key = (ep.get("method", "GET"), _path_template(ep.get("path", "")))
+            public_templates.setdefault(key, ep.get("path"))
+
+    propagated = 0
+    for ep in results["endpoints"]:
+        if (not ep.get("intentionally_public")
+                and ep.get("status_code") in (200, 201)
+                and "spider" in ep.get("sources", [])):
+            key = (ep.get("method", "GET"), _path_template(ep.get("path", "")))
+            if key in public_templates:
+                ep["intentionally_public"] = True
+                ep["public_inferred_from"] = public_templates[key]
+                propagated += 1
+
+    if propagated:
+        console.print(
+            f"  [dim]{propagated} endpoint(s) marcados público-por-diseño por "
+            f"coincidir con el patrón de un endpoint ya documentado como tal.[/dim]"
+        )
 
     total = len(results["endpoints"])
     runtime_generated = sum(1 for ep in results["endpoints"] if ep.get("runtime_generated"))

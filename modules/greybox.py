@@ -4,7 +4,7 @@
 #  Orquestador del modo greybox.
 #  Submodos:
 #    [1] API audit  — Bearer token + discovery + audit
-#    [2] SSO audit  — VALid2 OAuth2 Bearer + checks de sesión
+#    [2] SSO audit  — OAuth2/OIDC Bearer + checks de sesión
 #    [3] Ambos
 #  Credenciales por prioridad:
 #    1. config (CLI flags --token / --api-doc)
@@ -32,7 +32,8 @@ def run_greybox(target: str, target_info: dict, config: dict) -> dict:
 
     results = {
         "submode":   None,
-        "token":     None,
+        "api_token": None,
+        "sso_token": None,
         "api_doc":   None,
         "discovery": {},
         "audit":     {},
@@ -41,92 +42,119 @@ def run_greybox(target: str, target_info: dict, config: dict) -> dict:
     }
 
     # ── Paso 1: Presentación y selección de submodo ───────────
-    console.print(Panel.fit(
-        "[bold magenta]MODO GREYBOX[/bold magenta] — Auditoría con credenciales\n\n"
-        "Selecciona qué quieres auditar:\n\n"
-        "  [bold cyan][1][/bold cyan] [bold]API audit[/bold]\n"
-        "      Auditoría de APIs REST o SOAP con token de autenticación.\n"
-        "      Descubre endpoints automáticamente y verifica autenticación,\n"
-        "      métodos, IDOR, exposición de datos y rate limiting.\n\n"
-        "  [bold cyan][2][/bold cyan] [bold]SSO audit[/bold]\n"
-        "      Auditoría de flujos OAuth2 / OpenID Connect.\n"
-        "      Verifica validación de tokens, logout, revocación\n"
-        "      y open redirect en redirect_uri.\n\n"
-        "  [bold cyan][3][/bold cyan] [bold]Ambos[/bold]\n"
-        "      API audit + SSO audit en un único informe.\n"
-        "      Máxima cobertura con una sola ejecución.",
-        title=f"[bold white]recon-cli · Greybox — {target}[/bold white]",
-        border_style="magenta"
-    ))
+    # Si GREYBOX_SUBMODE está configurado (.env o CLI), se salta el menú
+    # entero — útil para pruebas repetidas contra el mismo target/submodo
+    # (p.ej. validar SSO varias veces sin tener que re-elegir cada vez).
+    preset = str(config.get("greybox_submode", "")).strip().lower()
+    SUBMODE_ALIASES = {
+        "1": 1, "api": 1, "api_audit": 1, "api-audit": 1,
+        "2": 2, "sso": 2, "sso_audit": 2, "sso-audit": 2, "oauth2": 2, "oidc": 2,
+        "3": 3, "both": 3, "ambos": 3, "all": 3,
+    }
+    submode = SUBMODE_ALIASES.get(preset)
 
-    while True:
-        try:
-            submode = IntPrompt.ask(
-                "\n[magenta]  Selecciona submodo[/magenta] [dim][1/2/3][/dim]",
-                choices=["1", "2", "3"],
-                default=1
+    if submode:
+        console.print(
+            f"\n[bold magenta]━━━ Greybox — {target}[/bold magenta]\n"
+            f"  [dim]Submodo preconfigurado (GREYBOX_SUBMODE={preset}) — menú omitido[/dim]"
+        )
+    else:
+        if preset:
+            console.print(
+                f"  [yellow]![/yellow] GREYBOX_SUBMODE=\"{preset}\" no reconocido "
+                f"(usa 1/2/3 o api/sso/both) — se muestra el menú interactivo"
             )
-            break
-        except Exception:
-            console.print("[yellow]  Introduce 1, 2 o 3[/yellow]")
+        console.print(Panel.fit(
+            "[bold magenta]MODO GREYBOX[/bold magenta] — Auditoría con credenciales\n\n"
+            "Selecciona qué quieres auditar:\n\n"
+            "  [bold cyan][1][/bold cyan] [bold]API audit[/bold]\n"
+            "      Auditoría de APIs REST o SOAP con token de autenticación.\n"
+            "      Descubre endpoints automáticamente y verifica autenticación,\n"
+            "      métodos, IDOR, exposición de datos y rate limiting.\n\n"
+            "  [bold cyan][2][/bold cyan] [bold]SSO audit[/bold]\n"
+            "      Auditoría de flujos OAuth2 / OpenID Connect.\n"
+            "      Verifica validación de tokens, logout, revocación\n"
+            "      y open redirect en redirect_uri.\n\n"
+            "  [bold cyan][3][/bold cyan] [bold]Ambos[/bold]\n"
+            "      API audit + SSO audit en un único informe.\n"
+            "      Máxima cobertura con una sola ejecución.",
+            title=f"[bold white]recon-cli · Greybox — {target}[/bold white]",
+            border_style="magenta"
+        ))
+
+        while True:
+            try:
+                submode = IntPrompt.ask(
+                    "\n[magenta]  Selecciona submodo[/magenta] [dim][1/2/3][/dim]",
+                    choices=["1", "2", "3"],
+                    default=1
+                )
+                break
+            except Exception:
+                console.print("[yellow]  Introduce 1, 2 o 3[/yellow]")
 
     results["submode"] = submode
     console.print(
         f"\n  [green]✓[/green] Submodo: [bold magenta]{_submode_name(submode)}[/bold magenta]"
     )
 
-    # ── Paso 2: Token de autenticación ────────────────────────
-    console.print(Panel.fit(
-        "[bold]Paso 2 — Token de autenticación[/bold]\n\n"
-        "Introduce el Bearer token para autenticar las peticiones.\n\n"
-        "  [dim]Ejemplos:[/dim]\n"
-        "  [dim]· JWT:      eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...[/dim]\n"
-        "  [dim]· API key:  a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2[/dim]\n\n"
-        "  [dim]Si no tienes token, pulsa Enter para continuar sin él.[/dim]\n"
-        "  [dim]El spider seguirá descubriendo endpoints públicos.[/dim]",
-        border_style="dim",
-    ))
     base_url = f"https://{target}"
+    step = 1
+    api_token = None
+    sso_token = None
+    api_docs  = []
+    env_file  = ""
 
-    # Si hay client credentials en config (.env), hacer el intercambio
-    # — si son completas (id + secret) → automático sin prompt
-    # — si son parciales (solo una) → interactivo completando lo que falta
-    env_client_id     = config.get("greybox_client_id", "")
-    env_client_secret = config.get("greybox_client_secret", "")
-    env_token_ep      = config.get("greybox_token_endpoint", "")
+    # ── Bloque API: credenciales + documentación ──────────────
+    if submode in (1, 3):
+        step += 1
+        console.print(Panel.fit(
+            f"[bold]Paso {step} — Credenciales de API[/bold]\n\n"
+            "Introduce el Bearer token para autenticar las peticiones de API.\n\n"
+            "  [dim]Ejemplos:[/dim]\n"
+            "  [dim]· JWT:      eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...[/dim]\n"
+            "  [dim]· API key:  a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2[/dim]\n\n"
+            "  [dim]Si no tienes token, pulsa Enter para continuar sin él.[/dim]\n"
+            "  [dim]El spider seguirá descubriendo endpoints públicos.[/dim]",
+            border_style="dim",
+        ))
 
-    if not config.get("greybox_token"):
-        if env_client_id and env_client_secret:
-            # Ambas en .env → intercambio automático
-            console.print("  [dim]Credenciales detectadas en .env — obteniendo token automáticamente...[/dim]")
-            token = _client_credentials_flow(
+        env_api_token          = config.get("greybox_api_token", "")
+        env_api_client_id      = config.get("greybox_api_client_id", "")
+        env_api_client_secret  = config.get("greybox_api_client_secret", "")
+        env_api_token_endpoint = config.get("greybox_api_token_endpoint", "")
+
+        if env_api_token:
+            api_token = env_api_token
+        elif env_api_client_id and env_api_client_secret:
+            console.print("  [dim]Credenciales de API detectadas en .env — obteniendo token automáticamente...[/dim]")
+            api_token = _client_credentials_flow(
                 base_url=base_url,
-                client_id=env_client_id,
-                client_secret=env_client_secret,
-                token_endpoint=env_token_ep,
+                client_id=env_api_client_id,
+                client_secret=env_api_client_secret,
+                token_endpoint=env_api_token_endpoint,
             )
         else:
-            # Parciales o ninguna → prompt interactivo, pre-rellenando lo que hay
-            token = _ask_token(base_url,
-                               hint_client_id=env_client_id,
-                               hint_client_secret=env_client_secret,
-                               hint_token_endpoint=env_token_ep)
-    else:
-        token = config.get("greybox_token")
-    if not token:
-        console.print(
-            "  [yellow][!][/yellow] Sin token — "
-            "se auditarán endpoints públicos y se verificará qué requiere auth."
-        )
-    else:
-        config["greybox_token"] = token
-        results["token"] = "***"
-        console.print("  [green]✓[/green] Token configurado")
+            api_token = _ask_token(base_url,
+                                   hint_client_id=env_api_client_id,
+                                   hint_client_secret=env_api_client_secret,
+                                   hint_token_endpoint=env_api_token_endpoint,
+                                   label="API")
 
-    # ── Paso 3: Documentación de la API (solo API audit) ─────
-    if submode in (1, 3):
+        if not api_token:
+            console.print(
+                "  [yellow][!][/yellow] Sin token de API — "
+                "se auditarán endpoints públicos y se verificará qué requiere auth."
+            )
+        else:
+            config["greybox_api_token"] = api_token
+            results["api_token"] = "***"
+            console.print("  [green]✓[/green] Token de API configurado")
+
+        # ── Documentación de la API ─────────────────────────────
+        step += 1
         console.print(Panel.fit(
-            "[bold]Paso 3 — Documentación de la API[/bold] [dim](opcional)[/dim]\n\n"
+            f"[bold]Paso {step} — Documentación de la API[/bold] [dim](opcional)[/dim]\n\n"
             "Si tienes documentación de la API, la herramienta la usará para\n"
             "descubrir todos los endpoints con precisión.\n"
             "Sin documentación, el spider intentará descubrirlos automáticamente.\n\n"
@@ -141,7 +169,7 @@ def run_greybox(target: str, target_info: dict, config: dict) -> dict:
         ))
 
         api_docs = list(config.get("greybox_api_docs", []))
-        env_file = config.get("greybox_env_file", "")
+        env_file = config.get("greybox_api_env_file", "")
 
         if not api_docs:
             try:
@@ -206,25 +234,84 @@ def run_greybox(target: str, target_info: dict, config: dict) -> dict:
             config["greybox_api_docs"] = api_docs
             results["api_doc"] = api_docs
         if env_file:
-            config["greybox_env_file"] = env_file
+            config["greybox_api_env_file"] = env_file
+
+    # ── Bloque SSO: credenciales ───────────────────────────────
+    if submode in (2, 3):
+        step += 1
+        console.print(Panel.fit(
+            f"[bold]Paso {step} — Credenciales de SSO / OAuth2[/bold]\n\n"
+            "Introduce el Bearer token para autenticar las peticiones de SSO.\n\n"
+            "  [dim]Ejemplos:[/dim]\n"
+            "  [dim]· JWT:      eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...[/dim]\n"
+            "  [dim]· API key:  a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2[/dim]\n\n"
+            "  [dim]Si no tienes token, pulsa Enter para continuar sin él.[/dim]\n"
+            "  [dim]El spider seguirá descubriendo endpoints públicos.[/dim]",
+            border_style="dim",
+        ))
+
+        env_sso_token          = config.get("greybox_sso_token", "")
+        env_sso_client_id      = config.get("greybox_sso_client_id", "")
+        env_sso_client_secret  = config.get("greybox_sso_client_secret", "")
+        env_sso_token_endpoint = config.get("greybox_sso_token_endpoint", "")
+
+        if env_sso_token:
+            sso_token = env_sso_token
+        elif env_sso_client_id and env_sso_client_secret:
+            console.print("  [dim]Credenciales de SSO detectadas en .env — obteniendo token automáticamente...[/dim]")
+            sso_token = _client_credentials_flow(
+                base_url=base_url,
+                client_id=env_sso_client_id,
+                client_secret=env_sso_client_secret,
+                token_endpoint=env_sso_token_endpoint,
+            )
+        else:
+            sso_token = _ask_token(base_url,
+                                   hint_client_id=env_sso_client_id,
+                                   hint_client_secret=env_sso_client_secret,
+                                   hint_token_endpoint=env_sso_token_endpoint,
+                                   label="SSO")
+
+        if not sso_token:
+            console.print(
+                "  [yellow][!][/yellow] Sin token de SSO — "
+                "se auditarán endpoints públicos y se verificará qué requiere auth."
+            )
+        else:
+            config["greybox_sso_token"] = sso_token
+            results["sso_token"] = "***"
+            console.print("  [green]✓[/green] Token de SSO configurado")
 
     # ── Resumen antes de ejecutar ─────────────────────────────
     api_docs_cfg = config.get("greybox_api_docs", [])
-    env_cfg      = config.get("greybox_env_file", "")
+    env_cfg      = config.get("greybox_api_env_file", "")
 
     # Construir líneas de documentación — una ruta por línea
     doc_lines = ""
-    if api_docs_cfg:
-        for doc in api_docs_cfg:
-            doc_lines += f"\n  Colección:     [cyan]{doc}[/cyan]"
-    else:
-        doc_lines = "\n  Colección:     [dim]ninguna — spider automático[/dim]"
+    if submode in (1, 3):
+        if api_docs_cfg:
+            for doc in api_docs_cfg:
+                doc_lines += f"\n  Colección:     [cyan]{doc}[/cyan]"
+        else:
+            doc_lines = "\n  Colección:     [dim]ninguna — spider automático[/dim]"
+
+    token_lines = ""
+    if submode in (1, 3):
+        token_lines += (
+            f"\n  Token API:     "
+            f"{'[green]configurado[/green]' if api_token else '[yellow]no configurado[/yellow]'}"
+        )
+    if submode in (2, 3):
+        token_lines += (
+            f"\n  Token SSO:     "
+            f"{'[green]configurado[/green]' if sso_token else '[yellow]no configurado[/yellow]'}"
+        )
 
     console.print(Panel.fit(
         f"[bold]Resumen de configuración greybox[/bold]\n\n"
         f"  Target:        [green]{target}[/green]\n"
-        f"  Submodo:       [magenta]{_submode_name(submode)}[/magenta]\n"
-        f"  Token:         {'[green]configurado[/green]' if token else '[yellow]no configurado[/yellow]'}"
+        f"  Submodo:       [magenta]{_submode_name(submode)}[/magenta]"
+        + token_lines
         + doc_lines +
         (f"\n  Entorno:       [cyan]{env_cfg}[/cyan]" if env_cfg else "") +
         "\n\n  [dim]Iniciando análisis...[/dim]",
@@ -258,7 +345,7 @@ def _run_api_audit(target: str, target_info: dict, config: dict, results: dict):
     """Ejecuta discovery + audit sobre APIs REST/SOAP."""
     from modules.api_discovery import run_discovery, verify_token
 
-    token   = config.get("greybox_token", "")
+    token   = config.get("greybox_api_token", "")
     timeout = config.get("REQUEST_TIMEOUT", 10)
     base_url = f"https://{target}"
 
@@ -310,7 +397,7 @@ def _run_api_audit(target: str, target_info: dict, config: dict, results: dict):
         if fallback_docs:
             config["greybox_api_docs"] = fallback_docs
             has_postman = any(d.endswith(".json") for d in fallback_docs)
-            if has_postman and not config.get("greybox_env_file"):
+            if has_postman and not config.get("greybox_api_env_file"):
                 console.print(Panel.fit(
                     "[bold]Entorno Postman[/bold] [dim](opcional)[/dim]\n\n"
                     "Si la colección usa variables como {{base_url}} o {{service_id}},\n"
@@ -320,7 +407,7 @@ def _run_api_audit(target: str, target_info: dict, config: dict, results: dict):
                 ))
                 env_file = _ask_env_file()
                 if env_file:
-                    config["greybox_env_file"] = env_file
+                    config["greybox_api_env_file"] = env_file
 
             # Re-ejecutar discovery con la documentación aportada
             console.print("\n[bold magenta]━━━ Greybox API — Discovery (con documentación)[/bold magenta]")
@@ -332,10 +419,22 @@ def _run_api_audit(target: str, target_info: dict, config: dict, results: dict):
     audit = run_audit(discovery, config)
     results["audit"] = audit
 
+    # Candidato de "endpoint de datos conocido" para el submodo 3 (Ambos):
+    # permite al SSO audit verificar que el token deja de funcionar tras
+    # logout/revocación, no solo que esos endpoints existen. Se elige el
+    # primer endpoint autenticado (no público, no runtime_generated) —
+    # no hace falta que ya haya funcionado con el token, el propio check
+    # de invalidación comprueba esto antes de sacar ninguna conclusión.
+    candidate = next(
+        (ep for ep in discovery.get("endpoints", [])
+         if not ep.get("intentionally_public") and not ep.get("runtime_generated")),
+        None
+    )
+    if candidate:
+        config["_greybox_data_endpoint"] = candidate.get("full_url")
 
-# ── SSO / VALid2 audit ────────────────────────────────────────
 
-# ── SSO / VALid2 audit ────────────────────────────────────────
+# ── SSO / OAuth2 audit ─────────────────────────────────────────
 
 def _run_sso_audit(target: str, target_info: dict, config: dict, results: dict):
     """Delega la auditoría OAuth2/OIDC en modules/oauth_audit.py."""
@@ -408,50 +507,102 @@ def _export_json(results: dict, config: dict):
 
 
 def _submode_name(submode: int) -> str:
-    return {1: "API audit", 2: "SSO / VALid2 audit", 3: "API + SSO"}.get(submode, "?")
+    return {1: "API audit", 2: "SSO / OAuth2 audit", 3: "API + SSO"}.get(submode, "?")
 
 
 def _ask_token(base_url: str = "", hint_client_id: str = "",
-               hint_client_secret: str = "", hint_token_endpoint: str = "") -> str:
+               hint_client_secret: str = "", hint_token_endpoint: str = "",
+               label: str = "") -> str:
     """
-    Pregunta credenciales de autenticación — soporta tres modos:
+    Pregunta credenciales de autenticación — soporta cuatro opciones:
     1. Bearer token directo (JWT o API key)
     2. Client Credentials (client_id + client_secret → intercambio automático)
     3. Sin autenticación
+    4. Ayuda guiada — para quien no tiene token y no sabe cómo conseguirlo
+       (p.ej. servidores OAuth2 que no soportan Client Credentials porque
+       validan personas reales — solo authorization_code, que requiere
+       login real de un usuario). Muestra los pasos y vuelve a preguntar
+       el método.
     Los hints pre-rellenan campos si ya vienen del .env.
+    label: contexto a mostrar ("API" / "SSO") para no confundir cuál de
+    los dos bloques de credenciales se está pidiendo en cada momento.
     """
-    console.print("\n[dim]¿Cómo quieres autenticarte?[/dim]")
-    console.print("  [bold cyan][1][/bold cyan] Bearer token directo  [dim](JWT o API key)[/dim]")
-    console.print("  [bold cyan][2][/bold cyan] Client ID + Secret    [dim](intercambio automático → Bearer)[/dim]")
-    if hint_client_id or hint_client_secret:
-        console.print(
-            f"  [dim]       → parcialmente configurado en .env: "
-            f"{'client_id ✓' if hint_client_id else 'client_id ✗'}  "
-            f"{'client_secret ✓' if hint_client_secret else 'client_secret ✗'}[/dim]"
-        )
-    console.print("  [bold cyan][3][/bold cyan] Sin autenticación     [dim](solo endpoints públicos)[/dim]")
+    prefix = f" ({label})" if label else ""
+    while True:
+        console.print(f"\n[dim]¿Cómo quieres autenticarte{prefix}?[/dim]")
+        console.print("  [bold cyan][1][/bold cyan] Bearer token directo  [dim](JWT o API key)[/dim]")
+        console.print("  [bold cyan][2][/bold cyan] Client ID + Secret    [dim](intercambio automático → Bearer)[/dim]")
+        if hint_client_id or hint_client_secret:
+            console.print(
+                f"  [dim]       → parcialmente configurado en .env: "
+                f"{'client_id ✓' if hint_client_id else 'client_id ✗'}  "
+                f"{'client_secret ✓' if hint_client_secret else 'client_secret ✗'}[/dim]"
+            )
+        console.print("  [bold cyan][3][/bold cyan] Sin autenticación     [dim](solo endpoints públicos)[/dim]")
+        console.print("  [bold cyan][4][/bold cyan] No tengo token y no sé cómo conseguirlo  [dim](ver ayuda)[/dim]")
 
-    try:
-        choice = Prompt.ask("  [magenta]Método[/magenta]", choices=["1", "2", "3"], default="3")
-    except Exception:
-        return ""
-
-    if choice == "1":
         try:
-            token = Prompt.ask("  [magenta]Token[/magenta]", password=True, default="")
-            return token.strip()
+            choice = Prompt.ask("  [magenta]Método[/magenta]", choices=["1", "2", "3", "4"], default="3")
         except Exception:
             return ""
 
-    elif choice == "2":
-        return _client_credentials_flow(
-            base_url=base_url,
-            client_id=hint_client_id,
-            client_secret=hint_client_secret,
-            token_endpoint=hint_token_endpoint,
-        )
+        if choice == "1":
+            try:
+                token = Prompt.ask("  [magenta]Token[/magenta]", password=True, default="")
+                return token.strip()
+            except Exception:
+                return ""
 
-    return ""
+        elif choice == "2":
+            return _client_credentials_flow(
+                base_url=base_url,
+                client_id=hint_client_id,
+                client_secret=hint_client_secret,
+                token_endpoint=hint_token_endpoint,
+            )
+
+        elif choice == "4":
+            _show_token_help(base_url)
+            continue  # vuelve a preguntar el método, ahora con el token ya en mano
+
+        return ""
+
+
+def _show_token_help(base_url: str = ""):
+    """
+    Guía paso a paso para conseguir un access_token manualmente vía el
+    flujo authorization_code — necesaria para IdPs que no soportan Client
+    Credentials porque validan la identidad de una persona real (no tiene
+    sentido un flujo máquina-a-máquina sin usuario en ese caso).
+    Genérica: sirve para cualquier servidor OAuth2/OIDC.
+    """
+    target_hint = base_url or "https://tu-servidor-oauth2.ejemplo"
+    console.print(Panel.fit(
+        "[bold]Cómo conseguir un token manualmente (flujo authorization_code)[/bold]\n\n"
+        "Necesitas: un [bold]client_id[/bold] registrado (y su [bold]client_secret[/bold] "
+        "si el servidor lo requiere) y una [bold]redirect_uri[/bold] registrada junto a él.\n\n"
+        "[bold cyan]1.[/bold cyan] Abre en el navegador (sustituye TU_CLIENT_ID y TU_REDIRECT):\n"
+        f"   [dim]{target_hint}/o/oauth2/auth?response_type=code&client_id=TU_CLIENT_ID"
+        "&redirect_uri=TU_REDIRECT&scope=openid&state=test123[/dim]\n"
+        "   [dim](si no conoces la ruta exacta de tu servidor, prueba /oauth2/authorize "
+        "o consulta su documentación)[/dim]\n\n"
+        "[bold cyan]2.[/bold cyan] Completa el login normal (usuario/contraseña, SMS, "
+        "certificado... lo que pida ese servidor)\n\n"
+        "[bold cyan]3.[/bold cyan] El navegador te redirige a tu redirect_uri con "
+        "[dim]?code=XXXX&state=test123[/dim] en la URL — cópialo de la barra de "
+        "direcciones aunque no haya nada escuchando en esa redirect_uri\n\n"
+        "[bold cyan]4.[/bold cyan] Cambia ese código por un token, con curl:\n"
+        "   [dim]curl -X POST " + target_hint + "/o/oauth2/token \\\n"
+        "     -d grant_type=authorization_code \\\n"
+        "     -d code=XXXX \\\n"
+        "     -d client_id=TU_CLIENT_ID \\\n"
+        "     -d client_secret=TU_CLIENT_SECRET \\\n"
+        "     -d redirect_uri=TU_REDIRECT[/dim]\n\n"
+        "[bold cyan]5.[/bold cyan] La respuesta trae el [bold]access_token[/bold] — "
+        "ese es el que introduces en la opción [1] Bearer token directo",
+        border_style="yellow",
+        title="[yellow]Ayuda — obtener token[/yellow]",
+    ))
 
 
 def _client_credentials_flow(base_url: str = "", client_id: str = "",

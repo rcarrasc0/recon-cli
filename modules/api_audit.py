@@ -35,6 +35,73 @@ API_SECURITY_HEADERS = {
 GRAPHQL_INTROSPECTION = '{"query": "{ __schema { types { name } } }"}'
 
 
+# ── Matriz de cobertura de pruebas ─────────────────────────────
+# Registra qué se comprobó y con qué resultado, aunque no haya hallazgos —
+# un informe que solo lista hallazgos no distingue "no lo hemos mirado" de
+# "lo hemos mirado y está bien". Se agrega por TIPO de check (no por
+# endpoint individual, o la tabla sería ilegible con muchos endpoints).
+COVERAGE_DEFS_API = {
+    "headers":         ("Cabeceras de seguridad de la API",              "Sin sesión"),
+    "graphql":         ("GraphQL introspection",                          "Ambas"),
+    "wsdl":            ("WSDL expuesto públicamente",                     "Sin sesión"),
+    "swagger":         ("Swagger/OpenAPI accesible sin autenticación",    "Sin sesión"),
+    "auth":            ("Autenticación (endpoint abierto / token inválido)", "Ambas"),
+    "methods":         ("Métodos HTTP no documentados",                  "Con sesión"),
+    "info_exposure":   ("Exposición de información (patrones)",         "Con sesión"),
+    "idor":            ("IDOR (ID adyacente)",                           "Con sesión"),
+    "sequential_id":   ("Identificadores secuenciales (endpoint público)","Sin sesión"),
+    "bola":            ("BOLA (cross-tenant)",                          "Con sesión"),
+    "undocumented":    ("Endpoint no documentado (shadow API)",          "Sin sesión"),
+    "mass_assignment": ("Mass Assignment",                               "Con sesión"),
+    "excessive_data":  ("Excessive Data Exposure",                       "Con sesión"),
+    "rate_limiting":   ("Rate limiting",                                 "Con sesión"),
+    "bfla":            ("BFLA (función de nivel superior accesible)",   "Con sesión"),
+}
+
+
+def _cov_init_api(results: dict):
+    results["coverage"] = {
+        key: {"label": label, "session": session, "tested": 0, "findings": 0, "detail": ""}
+        for key, (label, session) in COVERAGE_DEFS_API.items()
+    }
+
+
+def _cov_run(results: dict, key: str, before_count: int):
+    """Registra una ejecución de check y cuántos findings nuevos generó."""
+    cov = results.setdefault("coverage", {})
+    if key not in cov:
+        return
+    cov[key]["tested"] += 1
+    after_count = len(results["findings"])
+    if after_count > before_count:
+        cov[key]["findings"] += after_count - before_count
+
+
+# Endpoints de PROTOCOLO OAuth2/OIDC (token, authorize, revoke, logout,
+# userinfo, discovery metadata) — no son recursos de negocio. Los checks
+# genéricos de este módulo (sin auth, IDOR, BOLA, Mass Assignment...) parten
+# de la base de que un endpoint autenticado usa Bearer y expone datos de
+# negocio; un token endpoint, por diseño (RFC 6749 §3.2), se autentica con
+# client_id/secret o un código en el BODY, no con un Bearer previo — así que
+# "responde igual con y sin Authorization header" no es una vulnerabilidad
+# ahí, es el comportamiento correcto. Ya están cubiertos por los checks
+# dedicados de oauth_audit.py (submodo SSO), que sí conocen ese protocolo.
+_OAUTH_PROTOCOL_LAST_SEGMENTS = (
+    "token", "authorize", "auth", "revoke", "logout", "userinfo", "introspect",
+)
+_OAUTH_PROTOCOL_HINTS = ("oauth2", "oauth", "connect", "openid")
+
+
+def _is_oauth_protocol_endpoint(path: str) -> bool:
+    p = path.lower().rstrip("/")
+    if p in ("/.well-known/openid-configuration", "/.well-known/oauth-authorization-server"):
+        return True
+    last_segment = p.split("/")[-1]
+    if last_segment in _OAUTH_PROTOCOL_LAST_SEGMENTS and any(hint in p for hint in _OAUTH_PROTOCOL_HINTS):
+        return True
+    return False
+
+
 def run_audit(discovery: dict, config: dict) -> dict:
     """
     Ejecuta todos los checks de seguridad sobre los endpoints descubiertos.
@@ -43,13 +110,13 @@ def run_audit(discovery: dict, config: dict) -> dict:
     global console
     console = config.get("console") or console
 
-    token    = config.get("greybox_token", "")
+    token    = config.get("greybox_api_token", "")
     timeout  = config.get("REQUEST_TIMEOUT", 10)
     base_url = discovery.get("base_url", "")
     endpoints = discovery.get("endpoints", [])
 
     # ── Perfil de agresividad ─────────────────────────────────
-    profile         = config.get("greybox_profile", "normal")
+    profile         = config.get("greybox_api_profile", "normal")
     rate_limit_reqs = {"normal": 15, "aggressive": 30}.get(profile, 15)
     console.print(f"  [dim]Perfil de auditoría: {profile}[/dim]")
 
@@ -58,6 +125,7 @@ def run_audit(discovery: dict, config: dict) -> dict:
         "endpoints_audited": 0,
         "endpoints_open":    0,
         "endpoints_runtime_generated": 0,
+        "endpoints_oauth_protocol": 0,
         "profile":           profile,
         "checks": {
             "auth":         0,
@@ -68,6 +136,7 @@ def run_audit(discovery: dict, config: dict) -> dict:
             "special":      0,
         },
     }
+    _cov_init_api(results)
 
     if not endpoints:
         console.print("  [yellow]![/yellow] Sin endpoints que auditar")
@@ -95,16 +164,21 @@ def run_audit(discovery: dict, config: dict) -> dict:
     with httpx.Client(timeout=timeout, verify=False, follow_redirects=False) as client:
 
         # ── Check global: cabeceras de seguridad API ─────────────
+        before = len(results["findings"])
         _check_api_headers(client, base_url, headers_with_token, results)
+        _cov_run(results, "headers", before)
 
         # ── Check global: GraphQL introspection ──────────────────
         if discovery.get("graphql_found"):
+            before = len(results["findings"])
             _check_graphql(client, base_url, headers_with_token,
                            headers_without_token, results)
+            _cov_run(results, "graphql", before)
             results["checks"]["special"] += 1
 
         # ── Check global: WSDL expuesto ──────────────────────────
         if discovery.get("wsdl_found"):
+            before = len(results["findings"])
             _add_finding(results, {
                 "phase":       "Greybox API",
                 "title":       "WSDL expuesto públicamente",
@@ -117,10 +191,12 @@ def run_audit(discovery: dict, config: dict) -> dict:
                 "cvss":        3.7,
                 "remediation": "Restringir acceso al WSDL. Solo exponer a clientes autorizados.",
             })
+            _cov_run(results, "wsdl", before)
             results["checks"]["special"] += 1
 
         # ── Swagger/ReDoc sin auth ───────────────────────────────
         if discovery.get("swagger_found"):
+            before = len(results["findings"])
             _add_finding(results, {
                 "phase":       "Greybox API",
                 "title":       "Swagger UI / OpenAPI accesible sin autenticación",
@@ -132,6 +208,7 @@ def run_audit(discovery: dict, config: dict) -> dict:
                 "cvss":        3.7,
                 "remediation": "Proteger /swagger-ui, /docs y /openapi.json con autenticación en producción.",
             })
+            _cov_run(results, "swagger", before)
             results["checks"]["special"] += 1
 
         # ── Por endpoint ─────────────────────────────────────────
@@ -150,29 +227,45 @@ def run_audit(discovery: dict, config: dict) -> dict:
                 results["endpoints_runtime_generated"] += 1
                 continue
 
+            if _is_oauth_protocol_endpoint(path):
+                results["endpoints_oauth_protocol"] += 1
+                console.print(
+                    f"  [dim]Endpoint de protocolo OAuth2/OIDC (no de negocio): {method} {path} "
+                    f"— excluido de checks genéricos, cubierto por el submodo SSO[/dim]"
+                )
+                continue
+
             results["endpoints_audited"] += 1
 
             # Check 1 — Sin autenticación
             if ep.get("intentionally_public"):
                 console.print(f"  [dim]Endpoint público (noauth): {method} {path}[/dim]")
                 results["checks"]["auth"] += 1
+                results["coverage"]["auth"]["tested"] += 1
+                results["coverage"]["auth"]["detail"] = "Incluye endpoints públicos por diseño (no se auditan como fallo)"
             else:
+                before = len(results["findings"])
                 open_finding = _check_no_auth(
                     client, method, full_url, path,
                     headers_with_token, headers_without_token, results
                 )
                 results["checks"]["auth"] += 1
+                _cov_run(results, "auth", before)
                 if open_finding:
                     results["endpoints_open"] += 1
 
             # Check 2 — Métodos HTTP no documentados
+            before = len(results["findings"])
             _check_extra_methods(client, full_url, path, method, headers_with_token, results)
             results["checks"]["methods"] += 1
+            _cov_run(results, "methods", before)
 
             # Check 3 — Info exposure en respuesta
+            before = len(results["findings"])
             _check_info_exposure(client, method, full_url, path, headers_with_token,
                                  results, ep.get("intentionally_public", False))
             results["checks"]["info_exposure"] += 1
+            _cov_run(results, "info_exposure", before)
 
             # Check 4 — IDOR básico (solo si el path contiene un ID numérico)
             # IDOR es por definición un fallo de CONTROL DE ACCESO. Si el endpoint
@@ -182,16 +275,20 @@ def run_audit(discovery: dict, config: dict) -> dict:
             # lugar, se reporta un hallazgo de naturaleza distinta (Check 4b).
             idor_found = False
             if re.search(r'/\d+', path) and not ep.get("intentionally_public"):
+                before = len(results["findings"])
                 idor_found = _check_idor(client, method, full_url, path, headers_with_token,
                             results, ep.get("intentionally_public", False))
                 results["checks"]["idor"] += 1
+                _cov_run(results, "idor", before)
 
             # Check 4b — Enumeración de IDs secuenciales en endpoint público
             # No es un fallo de acceso, pero permite inferir volumen/cardinalidad
             # de negocio (p.ej. nº de credenciales emitidas) por incremento simple.
             if re.search(r'/\d+', path) and ep.get("intentionally_public"):
+                before = len(results["findings"])
                 _check_sequential_id_enumeration(client, method, full_url, path,
                                                  headers_with_token, results)
+                _cov_run(results, "sequential_id", before)
 
             # Check 5 — BOLA / Cross-tenant (IDs no secuenciales: 0, 99, 9999)
             # Se omite si el Check 4 (IDOR) ya reportó el mismo endpoint: ambos
@@ -199,10 +296,13 @@ def run_audit(discovery: dict, config: dict) -> dict:
             # generar los dos findings solo duplica ruido en el informe.
             # También se omite en endpoints públicos — ver comentario del Check 4.
             if re.search(r'/\d+', path) and not ep.get("intentionally_public") and not idor_found:
+                before = len(results["findings"])
                 _check_bola(client, method, full_url, path, headers_with_token, results)
+                _cov_run(results, "bola", before)
 
             # Check 6 — Endpoint no documentado (solo spider)
             if path in spider_only_paths and documented_paths:
+                before = len(results["findings"])
                 _add_finding(results, {
                     "phase":       "Greybox API",
                     "title":       f"Endpoint no documentado descubierto: {method} {path}",
@@ -218,23 +318,36 @@ def run_audit(discovery: dict, config: dict) -> dict:
                         "Si no es necesario, considerar eliminarlo o restringir el acceso."
                     ),
                 })
+                _cov_run(results, "undocumented", before)
 
             # Check 7 — Mass Assignment (solo POST/PUT autenticados)
             if method in ("POST", "PUT") and not ep.get("intentionally_public"):
+                before = len(results["findings"])
                 _check_mass_assignment(client, method, full_url, path,
                                        headers_with_token, results)
+                _cov_run(results, "mass_assignment", before)
 
             # Check 8 — Excessive Data Exposure en respuestas autenticadas
             if not ep.get("intentionally_public") and method == "GET":
+                before = len(results["findings"])
                 _check_excessive_data(client, full_url, path,
                                       headers_with_token, results)
+                _cov_run(results, "excessive_data", before)
+
+            # Check 9 — BFLA heurístico (función de nivel superior accesible)
+            before = len(results["findings"])
+            _check_bfla(client, method, full_url, path, headers_with_token,
+                       results, ep.get("intentionally_public", False))
+            _cov_run(results, "bfla", before)
 
         # ── Check global: rate limiting ──────────────────────────
         if endpoints:
             test_url = endpoints[0].get("full_url", base_url)
+            before = len(results["findings"])
             _check_rate_limiting(client, test_url, headers_with_token,
                                  results, rate_limit_reqs)
             results["checks"]["rate_limit"] += 1
+            _cov_run(results, "rate_limiting", before)
 
     console.print(
         f"  [green]✓[/green] Auditoría completada — "
@@ -430,6 +543,7 @@ def _check_idor(client, method, url, path, headers, results,
                     "Usar UUIDs en lugar de IDs secuenciales para dificultar la enumeración."
                 ),
                 "confidence": "MEDIUM",
+                "escalation": "horizontal",
                 "evidence": {
                     "id_original":       original_id,
                     "id_probado":        test_id,
@@ -654,6 +768,7 @@ def _check_bola(client, method, url, path, headers, results):
                         f"en cada operación sobre recursos."
                     ),
                     "confidence": "MEDIUM",
+                    "escalation": "horizontal",
                     "evidence": {
                         "id_original": original_id,
                         "id_probado":  test_id,
@@ -724,6 +839,13 @@ def _check_mass_assignment(client, method, url, path, headers, results):
         reflected = [label for pattern, label in reflected_patterns if pattern.search(body)]
 
         if reflected:
+            # role/admin reflejado = elevas TU propio privilegio (vertical).
+            # Solo tenant_id reflejado, sin role/admin = te mueves a OTRO
+            # tenant al mismo nivel de privilegio (horizontal), no una
+            # elevación de rol en sí.
+            is_vertical = any(r.startswith("role=") or r == "admin=true" for r in reflected)
+            escalation = "vertical" if is_vertical else "horizontal"
+
             _add_finding(results, {
                 "phase":       "Greybox API",
                 "title":       f"Posible Mass Assignment: {method} {path}",
@@ -742,7 +864,79 @@ def _check_mass_assignment(client, method, url, path, headers, results):
                     "Ignorar o rechazar campos no esperados en el body de la petición."
                 ),
                 "confidence": "HIGH",
+                "escalation": escalation,
             })
+    except Exception:
+        pass
+
+
+# Palabras clave de path que sugieren una función de nivel superior
+# (administración, gestión interna) — no es una lista exhaustiva, es una
+# heurística de nomenclatura habitual en APIs reales.
+ADMIN_PATH_KEYWORDS = (
+    "/admin", "/administrator", "/internal", "/management", "/manage",
+    "/staff", "/backoffice", "/back-office", "/superuser", "/root",
+    "/ops", "/moderat", "/console", "/debug", "/system", "/_internal",
+)
+
+
+def _check_bfla(client, method, url, path, headers, results, intentionally_public=False):
+    """
+    BFLA (Broken Function Level Authorization) heurístico — comprueba si un
+    endpoint cuyo path sugiere una función de nivel superior (admin,
+    interno, gestión...) responde con éxito al token de prueba aportado.
+
+    Limitación real, y por eso confidence Baja: no hay comparación entre un
+    token normal y uno con privilegios elevados — solo disponemos del token
+    que se aportó a la ejecución. Esto es un indicio por convención de
+    nomenclatura del path, no una confirmación de escalada de privilegios
+    real. Requiere verificación manual sabiendo qué rol tiene ese token.
+
+    Si el endpoint es además público (intentionally_public), el hallazgo es
+    más serio — ni siquiera hace falta un token para llegar a una función
+    que suena a administrativa — y se marca con severidad mayor.
+    """
+    path_lower = path.lower()
+    if not any(kw in path_lower for kw in ADMIN_PATH_KEYWORDS):
+        return
+    try:
+        r = _request(client, method, url, headers)
+        if not r or r.status_code not in (200, 201):
+            return
+
+        if intentionally_public:
+            severity, cvss = "HIGH", 7.1
+            access_note = (
+                "El endpoint es además público (no requiere token) — cualquiera puede "
+                "acceder a una función que por su nombre sugiere ser administrativa."
+            )
+        else:
+            severity, cvss = "MEDIUM", 6.5
+            access_note = (
+                "Requiere verificación manual: confirma qué rol tiene el token empleado "
+                "en esta auditoría — si es un usuario SIN privilegios elevados, esto "
+                "sería una escalada de privilegios vertical real (BFLA)."
+            )
+
+        _add_finding(results, {
+            "phase":       "Greybox API",
+            "title":       f"Posible BFLA: función de nivel superior accesible: {method} {path}",
+            "description": (
+                f"{method} {url} responde HTTP {r.status_code}. El path sugiere una "
+                f"función de administración/gestión interna (coincide con: "
+                f"{', '.join(kw for kw in ADMIN_PATH_KEYWORDS if kw in path_lower)}). "
+                f"{access_note}"
+            ),
+            "severity":    severity,
+            "cvss":        cvss,
+            "remediation": (
+                "Verificar que este endpoint aplica control de autorización a nivel "
+                "de función (Broken Function Level Authorization — OWASP API Security "
+                "Top 10), no solo autenticación, restringido al rol correspondiente."
+            ),
+            "confidence":  "LOW",
+            "escalation":  "vertical",
+        })
     except Exception:
         pass
 
