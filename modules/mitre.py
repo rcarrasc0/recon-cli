@@ -137,25 +137,45 @@ MITRE_MAPPING = [
 
     # ── Greybox API ───────────────────────────────────────────
 
-    # IDOR / BOLA → acceso no autorizado a datos de otro usuario/tenant
-    # explotando un fallo de autorización expuesto en la propia API pública.
-    # (No es Privilege Escalation: no hay elevación de privilegio, es acceso
-    # a datos del mismo nivel de privilegio que no debería ser visible.)
+    # IDOR / BOLA → acceso no autorizado a datos de otro usuario/tenant.
+    # FIX (revisión de calidad v1.2.1): estaba mapeado a T1190 (Initial
+    # Access / Exploit Public-Facing Application), pero eso es conceptualmente
+    # incorrecto — en IDOR/BOLA el atacante YA TIENE una sesión/token válido
+    # (aunque de menor alcance) y accede a MÁS datos de los que le corresponden;
+    # no está "ganando acceso inicial", está RECOLECTANDO datos fuera de su
+    # alcance autorizado. Es el mismo objetivo del adversario que Excessive
+    # Data Exposure (T1213) — solo cambia el mecanismo (manipular un ID vs.
+    # que la API devuelva de más), así que comparte la misma técnica.
     {
         "keywords":        ("idor", "bola", "broken object", "acceso no autorizado a recursos"),
-        "tactic_id":       "TA0001",
-        "tactic":          "Initial Access",
-        "technique_id":    "T1190",
-        "technique":       "Exploit Public-Facing Application",
+        "tactic_id":       "TA0009",
+        "tactic":          "Collection",
+        "technique_id":    "T1213",
+        "technique":       "Data from Information Repositories",
         "subtechnique_id": None,
         "subtechnique":    None,
-        "url":             "https://attack.mitre.org/techniques/T1190/",
+        "url":             "https://attack.mitre.org/techniques/T1213/",
     },
 
     # Mass Assignment → aquí SÍ hay elevación de privilegio real cuando el
     # valor inyectado (p.ej. role=admin) queda persistido/reflejado.
     {
         "keywords":        ("mass assignment",),
+        "tactic_id":       "TA0004",
+        "tactic":          "Privilege Escalation",
+        "technique_id":    "T1548",
+        "technique":       "Abuse Elevation Control Mechanism",
+        "subtechnique_id": None,
+        "subtechnique":    None,
+        "url":             "https://attack.mitre.org/techniques/T1548/",
+    },
+
+    # BFLA (Broken Function Level Authorization) → acceso a función de
+    # nivel superior (admin/gestión) con un token de menor privilegio —
+    # misma técnica que Mass Assignment: elevación real, no solo acceso
+    # a datos de otro usuario (eso sería BOLA/IDOR, ya mapeado aparte).
+    {
+        "keywords":        ("bfla", "función de nivel superior"),
         "tactic_id":       "TA0004",
         "tactic":          "Privilege Escalation",
         "technique_id":    "T1548",
@@ -179,17 +199,24 @@ MITRE_MAPPING = [
         "url":             "https://attack.mitre.org/techniques/T1595/003/",
     },
 
-    # Endpoint sin autenticación → Valid Accounts (acceso con credenciales nulas)
+    # Endpoint sin autenticación → explotar una debilidad de control de
+    # acceso en la app pública para acceder SIN ninguna credencial.
+    # FIX (revisión de calidad v1.2.1): estaba mapeado a T1078 Valid
+    # Accounts, pero T1078 presupone que el adversario OBTIENE y USA una
+    # credencial legítima — es justo lo contrario de este hallazgo, donde
+    # no hace falta ninguna credencial en absoluto. T1190 (Exploit
+    # Public-Facing Application) sí encaja: es literalmente "explotar una
+    # debilidad de la app pública para ganar acceso", sin credenciales.
     {
         "keywords":        ("sin autenticación", "no requiere autenticación", "endpoint abierto",
                             "sin token"),
         "tactic_id":       "TA0001",
         "tactic":          "Initial Access",
-        "technique_id":    "T1078",
-        "technique":       "Valid Accounts",
-        "subtechnique_id": "T1078.004",
-        "subtechnique":    "Cloud Accounts",
-        "url":             "https://attack.mitre.org/techniques/T1078/004/",
+        "technique_id":    "T1190",
+        "technique":       "Exploit Public-Facing Application",
+        "subtechnique_id": None,
+        "subtechnique":    None,
+        "url":             "https://attack.mitre.org/techniques/T1190/",
     },
 
     # Rate limiting ausente → Resource Exhaustion / DoS
