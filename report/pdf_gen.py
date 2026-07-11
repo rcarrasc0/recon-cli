@@ -15,7 +15,7 @@ from reportlab.lib.units import cm, mm
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, HRFlowable, KeepTogether, CondPageBreak
+    PageBreak, HRFlowable, KeepTogether
 )
 from reportlab.platypus.flowables import Flowable
 from reportlab.pdfgen import canvas
@@ -212,16 +212,39 @@ def generate_report(results: dict, output_path: str, config: dict):
     story   = []
     content_width = PAGE_W - 2 * MARGIN
 
+    # ── Numeración de secciones — se precalcula ANTES de construir nada,
+    # para poder resolver referencias cruzadas (p.ej. "ver sección X de
+    # MITRE" desde el resumen ejecutivo) sin adivinar ni hardcodear números
+    # que cambian según qué secciones condicionales apliquen en cada informe.
+    has_root_domain = bool(results.get("root_domain_findings"))
+    has_greybox     = results.get("scope") == "greybox" and bool(results.get("greybox"))
+    has_cvss        = bool([f for f in results.get("findings", []) if f.get("cvss", 0) > 0])
+    has_mitre       = bool(results.get("mitre_techniques"))
+
+    sec = {}
+    n = 8  # 1-7 son fijas: Resumen, Alcance, Hallazgos, SSL, Cabeceras, WAF, OSINT
+    if has_root_domain:
+        sec["root_domain"] = n; n += 1
+    if has_greybox:
+        sec["greybox"] = n; n += 1
+    sec["cves"] = n; n += 1
+    if has_cvss:
+        sec["cvss"] = n; n += 1
+    if has_mitre:
+        sec["mitre"] = n; n += 1
+    sec["mitigations"] = n; n += 1
+    sec["metadata"] = n
+
     # ── PORTADA ───────────────────────────────────────────────
     story += _build_cover(results, config, styles, content_width)
 
     # ── ÍNDICE ────────────────────────────────────────────────
     story.append(PageBreak())
-    story += _build_index(results, styles, content_width)
+    story += _build_index(results, styles, content_width, sec)
 
     # ── RESUMEN EJECUTIVO ─────────────────────────────────────
     story.append(PageBreak())
-    story += _build_executive_summary(results, styles, content_width)
+    story += _build_executive_summary(results, styles, content_width, sec.get("mitre"))
 
     # ── ALCANCE Y METODOLOGÍA ─────────────────────────────────
     story.append(PageBreak())
@@ -245,64 +268,58 @@ def generate_report(results: dict, output_path: str, config: dict):
 
     # ── OSINT & RECONOCIMIENTO ────────────────────────────────
     story.append(PageBreak())
-    story += _build_osint_section(results, styles, content_width)
+    story += _build_osint_section(results, styles, content_width, sec.get("root_domain"))
+
+    # ── OPORTUNIDADES DE MEJORA (dominio raíz) ───────────────
+    # Reordenado (v1.2.1): antes iba después de CVEs/CVSS — un resumen de
+    # hallazgos apareciendo antes de la operativa que los genera no tiene
+    # sentido de lectura. Ahora todas las fases "de campo" (SSL, cabeceras,
+    # WAF, OSINT, dominio raíz, greybox) van seguidas, y los resúmenes
+    # (CVEs, CVSS, MITRE) cierran detrás, cuando ya se ha visto todo.
+    if has_root_domain:
+        story.append(PageBreak())
+        story += _build_improvement_section(results, styles, content_width, sec["root_domain"])
+
+    # ── GREYBOX ───────────────────────────────────────────────
+    if has_greybox:
+        story.append(PageBreak())
+        story += _build_greybox_section(results, styles, content_width, sec["greybox"])
 
     # ── CVEs ────────────────────────────────────────────────────
     story.append(PageBreak())
-    story += _build_cves_section(results, styles, content_width)
-
-    # Contador dinámico de secciones — las 8 fijas ya ocupan 1-8
-    sec_num = 9  # próxima sección condicional
+    story += _build_cves_section(results, styles, content_width, sec["cves"])
 
     # ── TABLA CVSS CONSOLIDADA ────────────────────────────────
-    cvss_findings = [f for f in results.get("findings", []) if f.get("cvss", 0) > 0]
-    if cvss_findings:
+    if has_cvss:
         story.append(PageBreak())
-        story += _build_cvss_table(results, styles, content_width, sec_num)
-        sec_num += 1
-
-    # ── OPORTUNIDADES DE MEJORA (dominio raíz) ───────────────
-    if results.get("root_domain_findings"):
-        story.append(PageBreak())
-        story += _build_improvement_section(results, styles, content_width, sec_num)
-        sec_num += 1
-
-    # ── GREYBOX ───────────────────────────────────────────────
-    if results.get("scope") == "greybox" and results.get("greybox"):
-        story.append(PageBreak())
-        story += _build_greybox_section(results, styles, content_width, sec_num)
-        sec_num += 1
+        story += _build_cvss_table(results, styles, content_width, sec["cvss"])
 
     # ── MITRE ATT&amp;CK ──────────────────────────────────────────
-    if results.get("mitre_techniques"):
+    if has_mitre:
         story.append(PageBreak())
-        story += _build_mitre_section(results, styles, content_width, sec_num)
-        sec_num += 1
+        story += _build_mitre_section(results, styles, content_width, sec["mitre"])
 
     # ── PROPUESTAS DE MITIGACIÓN ──────────────────────────────
     story.append(PageBreak())
-    story += _build_mitigations_section(results, styles, content_width, sec_num)
-    sec_num += 1
+    story += _build_mitigations_section(results, styles, content_width, sec["mitigations"])
 
     # ── METADATOS DE EJECUCIÓN ────────────────────────────────
-    story.append(CondPageBreak(8 * cm))
-    story += _build_execution_metadata(results, styles, content_width, sec_num)
+    story.append(PageBreak())
+    story += _build_execution_metadata(results, styles, content_width, sec["metadata"])
 
     # Construir PDF
     doc.build(story, canvasmaker=PageNumCanvas)
 
 
 # ── ÍNDICE ────────────────────────────────────────────────────
-def _build_index(results, styles, w):
+def _build_index(results, styles, w, sec):
     story = []
     scope    = results.get("scope", "blackbox")
     is_grey  = scope == "greybox"
-    findings = results.get("findings", [])
-    has_cvss = any(f.get("cvss", 0) > 0 for f in findings)
-    has_root = bool(results.get("root_domain_findings"))
-    has_mitre= bool(results.get("mitre_techniques"))
-    has_cves = bool(results.get("cves"))
-    has_grey = is_grey and bool(results.get("greybox"))
+    has_cvss  = "cvss" in sec
+    has_root  = "root_domain" in sec
+    has_mitre = "mitre" in sec
+    has_grey  = "greybox" in sec
 
     story.append(Paragraph("Índice", styles["h1"]))
     story.append(ColorLine(w, C_ACCENT, 2))
@@ -340,46 +357,48 @@ def _build_index(results, styles, w):
         Paragraph("Condición",   hdr_st),
     ]
 
-    # Definir secciones dinámicamente
-    n = [0]
-    def next_n(): n[0] += 1; return n[0]
-
+    # Secciones 1-7 fijas, mismo orden que el resto del documento
     sections = []
-    sections.append(row(next_n(), "Resumen Ejecutivo",
+    sections.append(row(1, "Resumen Ejecutivo",
         "KPIs de severidad, riesgo global, técnicas MITRE y artefactos generados"))
-    sections.append(row(next_n(), "Alcance y Metodología",
+    sections.append(row(2, "Alcance y Metodología",
         "Target, IPs, modalidad, fases ejecutadas y duración"))
-    sections.append(row(next_n(), "Hallazgos de Seguridad",
+    sections.append(row(3, "Hallazgos de Seguridad",
         "Hallazgos clasificados por severidad con CVSS y correlación MITRE"))
-    sections.append(row(next_n(), "Análisis SSL/TLS",
+    sections.append(row(4, "Análisis SSL/TLS",
         "Certificado X.509, protocolos, cifrados, HSTS — RSA / ECDSA / DSA"))
-    sections.append(row(next_n(), "Cabeceras HTTP",
+    sections.append(row(5, "Cabeceras HTTP",
         "Security headers, CSP, cookies y fugas de información"))
-    sections.append(row(next_n(), "Detección WAF/CDN",
+    sections.append(row(6, "Detección WAF/CDN",
         "Cloudflare, AWS, Azure, Akamai — posible bypass de origen"))
-    sections.append(row(next_n(), "OSINT & Reconocimiento",
+    sections.append(row(7, "OSINT & Reconocimiento",
         "DNS, AXFR, crt.sh, ASN/BGP — scope endpoint vs dominio raíz"))
-    sections.append(row(next_n(), "CVEs Identificados",
-        "Correlación CVE/CVSS con NVD/NIST. Fallback CIRCL. Solo versión confirmada"))
 
-    if has_cvss:
-        sections.append(row(next_n(), "Tabla CVSS Consolidada",
-            "Todos los hallazgos con CVSS > 0 ordenados por severidad",
-            "Solo si hay hallazgos con CVSS"))
+    # Secciones 8+ dinámicas, en el MISMO orden en que se construyen en
+    # generate_report() — reordenado en v1.2.1: las fases "de campo"
+    # (dominio raíz, greybox) van seguidas de OSINT, y los resúmenes
+    # (CVEs, CVSS, MITRE) cierran detrás, cuando ya se ha visto toda la
+    # operativa que resumen.
     if has_root:
-        sections.append(row(next_n(), "Análisis del Dominio Raíz",
+        sections.append(row(sec["root_domain"], "Análisis del Dominio Raíz",
             "SPF, DMARC, WHOIS/ASN — fuera del scoring del endpoint analizado",
             "Solo si hay hallazgos de dominio raíz"))
     if has_grey:
-        sections.append(row(next_n(), "Análisis Greybox",
-            "Discovery de endpoints, auditoría de autenticación, IDORs, SSO/OAuth2",
+        sections.append(row(sec["greybox"], "Análisis Greybox",
+            "Discovery de endpoints, cobertura de pruebas, IDORs, SSO/OAuth2",
             "Solo con --scope greybox", color=HexColor("#8250DF")))
+    sections.append(row(sec["cves"], "CVEs Identificados",
+        "Correlación CVE/CVSS con NVD/NIST. Fallback CIRCL. Solo versión confirmada"))
+    if has_cvss:
+        sections.append(row(sec["cvss"], "Tabla CVSS Consolidada",
+            "Todos los hallazgos con CVSS > 0 ordenados por severidad",
+            "Solo si hay hallazgos con CVSS"))
     if has_mitre:
-        sections.append(row(next_n(), "Correlación MITRE ATT&amp;CK",
+        sections.append(row(sec["mitre"], "Correlación MITRE ATT&amp;CK",
             "Táctica + técnica + sub-técnica por cada hallazgo"))
-    sections.append(row(next_n(), "Propuestas de Mitigación",
+    sections.append(row(sec["mitigations"], "Propuestas de Mitigación",
         "Acciones priorizadas por severidad con plazos recomendados"))
-    sections.append(row(next_n(), "Metadatos de Ejecución",
+    sections.append(row(sec["metadata"], "Metadatos de Ejecución",
         "Run ID, comando, target, inicio/fin, duración, versión y artefactos"))
 
     # Anchos de columna
@@ -559,7 +578,7 @@ def _build_cover(results, config, styles, w):
 
 
 # ── RESUMEN EJECUTIVO ─────────────────────────────────────────
-def _build_executive_summary(results, styles, w):
+def _build_executive_summary(results, styles, w, mitre_sec_num=None):
     story = []
     findings = results.get("findings", [])
     counts   = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
@@ -764,10 +783,12 @@ def _build_executive_summary(results, styles, w):
             ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
         ]))
         story.append(KeepTogether([mitre_table_title, mt]))
-        story.append(Paragraph(
-            f"<i>Detalle completo en sección 10. Correlación MITRE ATT&amp;CK.</i>",
-            styles["body_small"]
-        ))
+        mitre_ref = (
+            f"Detalle completo en sección {mitre_sec_num}. Correlación MITRE ATT&amp;CK."
+            if mitre_sec_num else
+            "Detalle completo en la sección de Correlación MITRE ATT&amp;CK."
+        )
+        story.append(Paragraph(f"<i>{mitre_ref}</i>", styles["body_small"]))
 
     # ── Warning NVD si hubo errores ───────────────────────────
     nvd_status = results.get("config_snapshot", {}).get("nvd_status") or ""
@@ -859,21 +880,45 @@ def _build_scope_section(results, styles, w):
         ("Fase 6 — Cabeceras HTTP", "Security headers, Content Security Policy, cookies y fugas de información."),
         ("Fase 7 — WAF/CDN",        "Detección pasiva de Cloudflare, AWS, Azure, Akamai y otros. Rangos IP estáticos y dinámicos."),
         ("Fase 8 — CVEs",           "Correlación CVE/CVSS con NVD/NIST (solo versión confirmada). Fallback automático a CIRCL Vulnerability-Lookup si NVD no está disponible."),
-        ("Fase 9 — MITRE ATT&amp;CK",   "Correlación táctica + técnica + sub-técnica de MITRE ATT&amp;CK Enterprise. Sin API externa. Mappings conservadores."),
-        ("Fase 10 — Dom. Raíz",     "Análisis WHOIS, ASN/BGP, SPF y DMARC del dominio raíz. Separado del scoring del endpoint analizado."),
     ]
+    # NOTA (fix v1.2.1): se retira la fila "Fase 10 — Dom. Raíz" que había
+    # aquí — no es una fase real numerada de main.py. Los hallazgos de
+    # dominio raíz (WHOIS/ASN/SPF/DMARC) salen de la consolidación dentro
+    # de la Fase 1 (OSINT), ya descrita arriba, y se detallan en la sección
+    # 8 del informe.
 
-    # Añadir fase greybox si el scope es greybox
+    # FIX (v1.2.1 — cambio bloqueante de release): Greybox pasa a numerarse
+    # ANTES que MITRE ATT&CK, igual que ahora lo ejecuta main.py. MITRE
+    # correlaciona hallazgos ya existentes — no los genera — así que debe
+    # ir después de la fase que los genera (Greybox incluido: IDOR, BOLA,
+    # BFLA, shadow APIs, JWT exposure, hallazgos OAuth2/OIDC...). Antes
+    # MITRE aparecía en la Fase 9, seguida de Greybox en la Fase 10 — el
+    # PDF correlacionaba antes de que existiera parte de lo que
+    # correlacionaba.
+    next_phase = 9
     if results.get("scope") == "greybox":
         greybox      = results.get("greybox", {})
         submode      = greybox.get("submode", 1)
-        submode_name = {1: "API audit", 2: "SSO audit", 3: "API audit + SSO audit"}.get(submode, "API audit")
+        submode_name = {1: "API audit", 2: "OAuth2/OIDC audit", 3: "API audit + OAuth2/OIDC audit"}.get(submode, "API audit")
         phases_list.append((
-            "Fase 11 — Greybox",
-            f"Análisis autenticado con credenciales — {submode_name}. "
-            f"Discovery de endpoints (Postman / OpenAPI / Spider), verificación de autenticación, "
-            f"detección de IDORs, exposición de información y auditoría OAuth2."
+            f"Fase {next_phase} — Greybox",
+            f"Análisis autenticado con credenciales — {submode_name}. Discovery multi-fuente "
+            f"(Postman / OpenAPI / Spider, 3 niveles en OAuth2: metadata estándar / rutas conocidas / "
+            f"crawl léxico). Controles de acceso (IDOR, BOLA, BFLA), Mass Assignment, Excessive Data "
+            f"Exposure, rate limiting, shadow APIs, y en OAuth2/OIDC: validación de tokens, invalidación "
+            f"tras logout/revocación, open redirect y protección anti-automatización. Cada hallazgo "
+            f"heurístico incluye nivel de confianza y, cuando aplica, tipo de impacto (horizontal/vertical). "
+            f"La sección de Análisis Greybox del informe incluye matriz de cobertura de todos los "
+            f"checks ejecutados, con o sin hallazgo."
         ))
+        next_phase += 1
+
+    phases_list.append((
+        f"Fase {next_phase} — MITRE ATT&amp;CK",
+        "Correlación táctica + técnica + sub-técnica de MITRE ATT&amp;CK Enterprise sobre TODOS los "
+        "hallazgos ya generados (incluidos los de Greybox, cuando aplica). Sin API externa. "
+        "Mappings conservadores."
+    ))
 
     phases_data = [
         [Paragraph(k, fk_st), Paragraph(v, fv_st)]
@@ -953,6 +998,7 @@ def _build_finding_card(finding, idx, sev, styles, w):
     rem        = finding.get("remediation", "")
     cvss       = finding.get("cvss", 0.0)
     confidence = finding.get("confidence")
+    escalation = finding.get("escalation")
 
     # Confianza: solo se muestra si el check la informa (checks heurísticos/
     # de comportamiento en Greybox API y SSO). Checks deterministas (cabecera
@@ -960,6 +1006,16 @@ def _build_finding_card(finding, idx, sev, styles, w):
     # nada distinguir "confianza" en un hecho binario.
     CONFIDENCE_LABEL = {"HIGH": "Alta", "MEDIUM": "Media", "LOW": "Baja"}
     CONFIDENCE_COLOR = {"HIGH": "#0D6634", "MEDIUM": "#9A6700", "LOW": "#57606A"}
+
+    # Escalada de privilegios: traducción a lenguaje llano de la nomenclatura
+    # técnica del título (BOLA/IDOR/Mass Assignment...) — para que alguien
+    # sin trasfondo OWASP entienda el impacto sin tener que buscar qué
+    # significa cada sigla.
+    ESCALATION_LABEL = {
+        "horizontal": "Escalada horizontal (mismo nivel, otro usuario/tenant)",
+        "vertical":   "Escalada vertical (a un rol de mayor privilegio)",
+    }
+    ESCALATION_COLOR = {"horizontal": "#9A6700", "vertical": "#9A3412"}
 
     # Card con borde lateral de color
     content_rows = []
@@ -977,15 +1033,27 @@ def _build_finding_card(finding, idx, sev, styles, w):
                 f"&nbsp;&nbsp;·&nbsp;&nbsp;<b>Confianza:</b> "
                 f"<font color='{CONFIDENCE_COLOR[confidence]}'>{CONFIDENCE_LABEL[confidence]}</font>"
             )
-        content_rows.append([Paragraph(cvss_line, styles["body_small"])])
-    elif confidence in CONFIDENCE_LABEL:
-        # Findings sin CVSS (p.ej. INFO) que sí llevan confidence
-        content_rows.append([
-            Paragraph(
-                f"<b>Confianza:</b> "
-                f"<font color='{CONFIDENCE_COLOR[confidence]}'>{CONFIDENCE_LABEL[confidence]}</font>",
-                styles["body_small"]
+        if escalation in ESCALATION_LABEL:
+            cvss_line += (
+                f"&nbsp;&nbsp;·&nbsp;&nbsp;<b>Impacto:</b> "
+                f"<font color='{ESCALATION_COLOR[escalation]}'>{ESCALATION_LABEL[escalation]}</font>"
             )
+        content_rows.append([Paragraph(cvss_line, styles["body_small"])])
+    elif confidence in CONFIDENCE_LABEL or escalation in ESCALATION_LABEL:
+        # Findings sin CVSS (p.ej. INFO) que sí llevan confidence/escalation
+        parts = []
+        if confidence in CONFIDENCE_LABEL:
+            parts.append(
+                f"<b>Confianza:</b> "
+                f"<font color='{CONFIDENCE_COLOR[confidence]}'>{CONFIDENCE_LABEL[confidence]}</font>"
+            )
+        if escalation in ESCALATION_LABEL:
+            parts.append(
+                f"<b>Impacto:</b> "
+                f"<font color='{ESCALATION_COLOR[escalation]}'>{ESCALATION_LABEL[escalation]}</font>"
+            )
+        content_rows.append([
+            Paragraph("&nbsp;&nbsp;·&nbsp;&nbsp;".join(parts), styles["body_small"])
         ])
     if rem:
         content_rows.append([
@@ -1507,7 +1575,7 @@ def _build_waf_section(results, styles, w):
     return story
 
 
-def _build_osint_section(results, styles, w):
+def _build_osint_section(results, styles, w, root_domain_sec_num=None):
     story = []
     osint = results.get("osint", {})
     enum  = results.get("enumeration", {})
@@ -1518,12 +1586,12 @@ def _build_osint_section(results, styles, w):
 
     is_sub = results.get("target_info", {}).get("is_subdomain", False)
     root   = results.get("target_info", {}).get("root_domain", "")
-    if is_sub:
+    if is_sub and root_domain_sec_num:
         story.append(Paragraph(
             f"Esta sección recoge los datos de reconocimiento directamente asociados al endpoint "
             f"<b>{results.get('target','')}</b>. "
             f"Los datos del dominio raíz <b>{root}</b> (WHOIS, ASN, SPF/DMARC) "
-            f"se encuentran en la sección 10.",
+            f"se encuentran en la sección {root_domain_sec_num}.",
             styles["body_small"]
         ))
         story.append(Spacer(1, 0.2 * cm))
@@ -1587,7 +1655,7 @@ def _build_osint_section(results, styles, w):
 
 
 # ── CVEs ──────────────────────────────────────────────────────
-def _build_cves_section(results, styles, w):
+def _build_cves_section(results, styles, w, sec_num):
     story = []
     cves  = results.get("cves", [])
 
@@ -1604,13 +1672,13 @@ def _build_cves_section(results, styles, w):
             rsn  = f" {cve_reason}" if cve_reason else ""
             msg  = base + src + rsn
         return [KeepTogether([
-            Paragraph("8. CVEs Identificados", styles["h1"]),
+            Paragraph(f"{sec_num}. CVEs Identificados", styles["h1"]),
             ColorLine(w, C_ACCENT, 2),
             Spacer(1, 0.3 * cm),
             Paragraph(msg, styles["body"]),
         ])]
 
-    story.append(Paragraph("8. CVEs Identificados", styles["h1"]))
+    story.append(Paragraph(f"{sec_num}. CVEs Identificados", styles["h1"]))
     story.append(ColorLine(w, C_ACCENT, 2))
     story.append(Spacer(1, 0.3 * cm))
     story.append(Paragraph(
@@ -1972,8 +2040,10 @@ def _build_greybox_section(results, styles, w, sec_num=11):
                 Paragraph("<b>Hallazgo</b>",  styles["body"]),
                 Paragraph("<b>Severidad</b>", styles["body"]),
                 Paragraph("<b>Confianza</b>", styles["body"]),
+                Paragraph("<b>Impacto</b>",   styles["body"]),
             ]]
             CONF_ES = {"HIGH": "Alta", "MEDIUM": "Media", "LOW": "Baja"}
+            ESC_ES  = {"horizontal": "Horizontal", "vertical": "Vertical"}
             for i, f in enumerate(gb_sorted, 1):
                 sev = f.get("severity", "INFO")
                 detail_rows.append([
@@ -1984,9 +2054,10 @@ def _build_greybox_section(results, styles, w, sec_num=11):
                         styles["body_small"]
                     ),
                     Paragraph(CONF_ES.get(f.get("confidence"), "—"), styles["body_small"]),
+                    Paragraph(ESC_ES.get(f.get("escalation"), "—"), styles["body_small"]),
                 ])
 
-            t_detail = Table(detail_rows, colWidths=[w * 0.06, w * 0.62, w * 0.16, w * 0.16])
+            t_detail = Table(detail_rows, colWidths=[w * 0.06, w * 0.48, w * 0.13, w * 0.13, w * 0.20])
             t_detail.setStyle(TableStyle([
                 ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
                 ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
@@ -2000,17 +2071,25 @@ def _build_greybox_section(results, styles, w, sec_num=11):
             ]))
             legend_flowables = []
             if any(f.get("confidence") for f in gb_sorted):
-                legend_flowables = [
-                    Spacer(1, 0.15 * cm),
-                    Paragraph(
-                        "<b>Confianza</b> — no es severidad, es cuánta verificación manual adicional "
-                        "requiere el hallazgo antes de priorizar su remediación: "
-                        "<b>Alta</b> = hecho verificable sin ambigüedad (p.ej. estructura de la URL). "
-                        "<b>Media</b> = patrón de comportamiento que conviene confirmar manualmente. "
-                        "<b>Baja</b> = indicio parcial, con cobertura limitada del check.",
-                        styles["body_small"]
-                    ),
-                ]
+                legend_flowables.append(Spacer(1, 0.15 * cm))
+                legend_flowables.append(Paragraph(
+                    "<b>Confianza</b> — no es severidad, es cuánta verificación manual adicional "
+                    "requiere el hallazgo antes de priorizar su remediación: "
+                    "<b>Alta</b> = hecho verificable sin ambigüedad (p.ej. estructura de la URL). "
+                    "<b>Media</b> = patrón de comportamiento que conviene confirmar manualmente. "
+                    "<b>Baja</b> = indicio parcial, con cobertura limitada del check.",
+                    styles["body_small"]
+                ))
+            if any(f.get("escalation") for f in gb_sorted):
+                legend_flowables.append(Spacer(1, 0.1 * cm))
+                legend_flowables.append(Paragraph(
+                    "<b>Impacto</b> — a qué tipo de escalada de privilegios corresponde (OWASP): "
+                    "<b>Horizontal</b> = acceso a datos de otro usuario u organización con el mismo "
+                    "nivel de privilegio (p.ej. ver el pedido de otro cliente). "
+                    "<b>Vertical</b> = elevación a un rol de mayor privilegio (p.ej. un usuario normal "
+                    "consigue permisos de administrador).",
+                    styles["body_small"]
+                ))
 
             story.append(KeepTogether([
                 Paragraph(f"{sec_num}.{sub_idx} Detalle de hallazgos de la auditoría API", styles["h2"]),
@@ -2046,6 +2125,199 @@ def _build_greybox_section(results, styles, w, sec_num=11):
             Paragraph(f"{sub_num} Resumen de Auditoría SSO / OAuth2", styles["h2"]),
             sso_body,
         ]))
+
+        # ── Detalle de hallazgos de la auditoría SSO ──────────────
+        # FIX (v1.2.1): antes esta sección solo daba el recuento
+        # ("Se identificaron N hallazgo(s)...") sin listarlos localmente,
+        # a diferencia del bloque de API que sí tiene su propia tabla
+        # (9.4 Detalle de hallazgos de la auditoría API). El texto
+        # completo sigue en la sección 3, esto es el mismo índice rápido
+        # que ya existe para API.
+        if sso_findings:
+            sub_idx += 1
+            sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+            sso_sorted = sorted(sso_findings, key=lambda f: sev_order.get(f.get("severity", "INFO"), 5))
+
+            CONF_ES = {"HIGH": "Alta", "MEDIUM": "Media", "LOW": "Baja"}
+            sso_detail_rows = [[
+                Paragraph("<b>#</b>",         styles["body"]),
+                Paragraph("<b>Hallazgo</b>",  styles["body"]),
+                Paragraph("<b>Severidad</b>", styles["body"]),
+                Paragraph("<b>Confianza</b>", styles["body"]),
+            ]]
+            for i, f in enumerate(sso_sorted, 1):
+                sev = f.get("severity", "INFO")
+                sso_detail_rows.append([
+                    Paragraph(str(i), styles["body_small"]),
+                    Paragraph(f.get("title", ""), styles["body_small"]),
+                    Paragraph(
+                        f"<font color='#{SEV_COLORS[sev].hexval()[2:]}'>{sev}</font>",
+                        styles["body_small"]
+                    ),
+                    Paragraph(CONF_ES.get(f.get("confidence"), "—"), styles["body_small"]),
+                ])
+
+            t_sso_detail = Table(sso_detail_rows, colWidths=[w * 0.06, w * 0.61, w * 0.16, w * 0.17])
+            t_sso_detail.setStyle(TableStyle([
+                ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+                ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+                ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
+                ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
+                ("TOPPADDING",    (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+                ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+            ]))
+
+            sub_idx_num = f"{sec_num}.{sub_idx}"
+            story.append(KeepTogether([
+                Paragraph(f"{sub_idx_num} Detalle de hallazgos de la auditoría SSO", styles["h2"]),
+                Spacer(1, 0.2 * cm),
+                t_sso_detail,
+                Spacer(1, 0.2 * cm),
+                Paragraph(
+                    "<i>Descripción, evidencia y mitigación completas de cada hallazgo en la sección "
+                    "3 (Hallazgos de Seguridad), buscando por el título exacto. Evidencia técnica "
+                    "adicional (requests/responses) en el JSON de auditoría.</i>",
+                    styles["body_small"]
+                ),
+            ]))
+
+    # ── Cobertura de pruebas realizadas ────────────────────────
+    # Un informe que solo lista hallazgos no distingue "no lo hemos
+    # comprobado" de "lo hemos comprobado y no hay ningún problema".
+    # Esta tabla lista TODOS los checks ejecutados (API y/o SSO según
+    # el submodo), con o sin hallazgo, indicando si requieren sesión
+    # (token) o no, y el resultado concreto de cada uno.
+    api_coverage = audit.get("coverage", {})     if submode in (1, 3) else {}
+    sso_coverage = sso_audit.get("coverage", {}) if submode in (2, 3) else {}
+
+    if api_coverage or sso_coverage:
+        sub_idx += 1
+
+        def _outcome_text(entry):
+            if entry.get("detail"):
+                return entry["detail"]
+            if entry["tested"] == 0:
+                return "No ejecutado — condición no aplicable en esta ejecución"
+            if entry["findings"] > 0:
+                return f"⚑ {entry['findings']} hallazgo(s) — ver sección 3"
+            return "Sin hallazgos — comportamiento correcto"
+
+        cov_rows = [[
+            Paragraph("<b>Check</b>",     styles["body"]),
+            Paragraph("<b>Ámbito</b>",    styles["body"]),
+            Paragraph("<b>Sesión</b>",    styles["body"]),
+            Paragraph("<b>Resultado</b>", styles["body"]),
+        ]]
+        for entry in api_coverage.values():
+            cov_rows.append([
+                Paragraph(entry["label"], styles["body_small"]),
+                Paragraph("API", styles["body_small"]),
+                Paragraph(entry["session"], styles["body_small"]),
+                Paragraph(_outcome_text(entry), styles["body_small"]),
+            ])
+        for entry in sso_coverage.values():
+            cov_rows.append([
+                Paragraph(entry["label"], styles["body_small"]),
+                Paragraph("SSO", styles["body_small"]),
+                Paragraph(entry["session"], styles["body_small"]),
+                Paragraph(_outcome_text(entry), styles["body_small"]),
+            ])
+
+        t_cov = Table(cov_rows, colWidths=[w * 0.32, w * 0.10, w * 0.14, w * 0.44])
+        t_cov.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_TABLE_HEAD),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), C_TABLE_TEXT),
+            ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_LIGHT]),
+            ("GRID",          (0, 0), (-1, -1), 0.5, C_BORDER),
+            ("TOPPADDING",    (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+
+        story.append(KeepTogether([
+            Paragraph(f"{sec_num}.{sub_idx} Cobertura de pruebas realizadas", styles["h2"]),
+            Spacer(1, 0.2 * cm),
+            t_cov,
+            Spacer(1, 0.2 * cm),
+            Paragraph(
+                "<i>Incluye checks sin hallazgos a propósito: confirman que se "
+                "comprobó y no se encontró ningún problema, no que no se haya "
+                "mirado. \"Sesión\" indica si el check requiere un token válido "
+                "(Con sesión) o se ejecuta sin credenciales (Sin sesión).</i>",
+                styles["body_small"]
+            ),
+        ]))
+
+    # ── Glosario de términos técnicos ─────────────────────────
+    # Para que cualquier lector del informe entienda los hallazgos de esta
+    # sección sin necesitar documentación externa ni conocer OWASP de memoria.
+    sub_idx += 1
+    glossary_terms = [
+        ("IDOR", "Insecure Direct Object Reference",
+         "El sistema usa un identificador (un número de pedido, un ID de usuario...) "
+         "directamente en la URL o en un parámetro, sin comprobar que ese recurso "
+         "pertenezca a quien lo pide. Cambiar el ID a mano permite ver o modificar "
+         "datos de otra persona."),
+        ("BOLA", "Broken Object Level Authorization",
+         "La misma idea que IDOR, pero es el término que usa específicamente el "
+         "estándar de seguridad de APIs (OWASP API Security Top 10) — mismo fallo "
+         "de fondo: no se valida a quién pertenece el objeto solicitado."),
+        ("BFLA", "Broken Function Level Authorization",
+         "Aquí el fallo no es sobre A QUÉ DATO se accede, sino sobre QUÉ FUNCIÓN se "
+         "puede ejecutar. Un usuario normal consigue llamar a una función pensada "
+         "solo para administradores (borrar, gestionar, exportar todo...), aunque no "
+         "esté viendo el dato de un usuario concreto."),
+        ("Mass Assignment", "",
+         "La API acepta y aplica campos del cuerpo de la petición que el cliente "
+         "nunca debería poder controlar (p.ej. <font face='Courier'>role</font>, "
+         "<font face='Courier'>is_admin</font>, <font face='Courier'>tenant_id</font>), "
+         "en vez de ignorarlos o rechazarlos. Si el servidor los guarda, basta con "
+         "añadir un campo de más al envío para autoasignarse privilegios."),
+        ("Excessive Data Exposure", "",
+         "La respuesta de la API incluye más información de la que el cliente "
+         "necesita (contraseñas, tokens internos, campos de otros usuarios...), "
+         "confiando en que el cliente \"no los use\" en vez de simplemente no "
+         "enviarlos."),
+        ("Confianza (Confidence)", "",
+         "No es severidad — indica cuánta certeza hay en la evidencia del hallazgo, "
+         "y por tanto cuánta verificación manual conviene hacer antes de actuar: "
+         "<b>Alta</b> = hecho verificable sin ambigüedad. <b>Media</b> = patrón de "
+         "comportamiento que conviene confirmar a mano. <b>Baja</b> = indicio "
+         "parcial, con cobertura limitada del check."),
+        ("Impacto horizontal", "Escalada horizontal",
+         "El atacante accede a datos de OTRO usuario u organización con el MISMO "
+         "nivel de privilegio que el suyo — ve el pedido de otro cliente, pero no "
+         "se convierte en administrador."),
+        ("Impacto vertical", "Escalada vertical",
+         "El atacante consigue un nivel de privilegio SUPERIOR al que le "
+         "corresponde — un usuario normal obtiene permisos de administrador."),
+    ]
+
+    glossary_flowables = [
+        Paragraph(
+            "Referencia rápida de los conceptos usados en esta sección, para no "
+            "depender de documentación externa (OWASP API Security Top 10 y "
+            "terminología asociada).",
+            styles["body_small"]
+        ),
+        Spacer(1, 0.2 * cm),
+    ]
+    for term, full_name, definition in glossary_terms:
+        label = f"<b>{term}</b>" + (f" <i>({full_name})</i>" if full_name else "")
+        glossary_flowables.append(Paragraph(f"{label} — {definition}", styles["body_small"]))
+        glossary_flowables.append(Spacer(1, 0.15 * cm))
+
+    story.append(KeepTogether([
+        Paragraph(f"{sec_num}.{sub_idx} Glosario de términos técnicos", styles["h2"]),
+        Spacer(1, 0.2 * cm),
+        glossary_flowables[0],
+    ]))
+    story += glossary_flowables[1:]
 
     return story
 
@@ -2102,7 +2374,7 @@ def _build_execution_metadata(results, styles, w, sec_num=13):
     block.append(Spacer(1, 0.3 * cm))
     block.append(Paragraph(
         f"<i>Informe generado por recon-cli {RECON_CLI_VERSION} el "
-        f"{results['start_time'].strftime('%d/%m/%Y a las %H:%M:%S')}. "
+        f"{results.get('end_time', results['start_time']).strftime('%d/%m/%Y a las %H:%M:%S')}. "
         f"Este documento es confidencial y está destinado exclusivamente al equipo de seguridad autorizado.</i>",
         styles["body_small"]
     ))
