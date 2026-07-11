@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────
 #  recon-cli · config.py
 #  Carga .env, valida configuración y clasifica el target.
-#  v1.2.0: añadidas variables greybox (token, client credentials)
+#  Incluye variables Greybox (API y SSO, cada una en su bloque).
 # ─────────────────────────────────────────────────────────────
 
 import os
@@ -43,13 +43,21 @@ def load_config() -> dict:
         "REPORT_OUTPUT_DIR":      os.getenv("REPORT_OUTPUT_DIR", "./reports/"),
         "REPORT_LOGO_PATH":       os.getenv("REPORT_LOGO_PATH", "").strip(),
         # ── Greybox (v1.2.0) ──────────────────────────────────
-        "GREYBOX_TOKEN":          os.getenv("GREYBOX_TOKEN", "").strip(),
-        "GREYBOX_CLIENT_ID":      os.getenv("GREYBOX_CLIENT_ID", "").strip(),
-        "GREYBOX_CLIENT_SECRET":  os.getenv("GREYBOX_CLIENT_SECRET", "").strip(),
-        "GREYBOX_TOKEN_ENDPOINT": os.getenv("GREYBOX_TOKEN_ENDPOINT", "").strip(),
-        "GREYBOX_API_DOC":        os.getenv("GREYBOX_API_DOC", "").strip(),
-        "GREYBOX_ENV_FILE":       os.getenv("GREYBOX_ENV_FILE", "").strip(),
-        "GREYBOX_PROFILE":        os.getenv("GREYBOX_PROFILE", "normal").strip(),
+        # ── Greybox — selección de submodo ─────────────────────
+        "GREYBOX_SUBMODE":            os.getenv("GREYBOX_SUBMODE", "").strip(),
+        # ── Greybox — bloque API ────────────────────────────────
+        "GREYBOX_API_TOKEN":          os.getenv("GREYBOX_API_TOKEN", "").strip(),
+        "GREYBOX_API_CLIENT_ID":      os.getenv("GREYBOX_API_CLIENT_ID", "").strip(),
+        "GREYBOX_API_CLIENT_SECRET":  os.getenv("GREYBOX_API_CLIENT_SECRET", "").strip(),
+        "GREYBOX_API_TOKEN_ENDPOINT": os.getenv("GREYBOX_API_TOKEN_ENDPOINT", "").strip(),
+        "GREYBOX_API_DOC":            os.getenv("GREYBOX_API_DOC", "").strip(),
+        "GREYBOX_API_ENV_FILE":       os.getenv("GREYBOX_API_ENV_FILE", "").strip(),
+        "GREYBOX_API_PROFILE":        os.getenv("GREYBOX_API_PROFILE", "normal").strip(),
+        # ── Greybox — bloque SSO ────────────────────────────────
+        "GREYBOX_SSO_TOKEN":          os.getenv("GREYBOX_SSO_TOKEN", "").strip(),
+        "GREYBOX_SSO_CLIENT_ID":      os.getenv("GREYBOX_SSO_CLIENT_ID", "").strip(),
+        "GREYBOX_SSO_CLIENT_SECRET":  os.getenv("GREYBOX_SSO_CLIENT_SECRET", "").strip(),
+        "GREYBOX_SSO_TOKEN_ENDPOINT": os.getenv("GREYBOX_SSO_TOKEN_ENDPOINT", "").strip(),
     }
 
     os.makedirs(config["REPORT_OUTPUT_DIR"], exist_ok=True)

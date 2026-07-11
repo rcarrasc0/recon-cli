@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────
-#  recon-cli · main.py  v1.2.0
-#  Entry point principal. Orquesta todas las fases del análisis.
-#  v1.2.0: modo greybox — API audit + SSO/VALid2 audit
+#  recon-cli · main.py
+#  Entry point principal. Orquesta todas las fases del análisis,
+#  incluido el modo greybox (API audit + SSO/OAuth2 audit).
 # ─────────────────────────────────────────────────────────────
 
 import sys
@@ -54,18 +54,19 @@ BANNER = BANNER_TEMPLATE.format(__version__=__version__)
 @click.option("--skip-cves",   is_flag=True, default=False, help="Omitir búsqueda de CVEs")
 @click.option("--output", "-o", default=None, help="Ruta del PDF de salida")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Output detallado")
-# ── Opciones greybox ──────────────────────────────────────────
-@click.option("--token", default=None,
-              help="Bearer token para modo greybox (ej: 'Bearer eyJ...')")
+# ── Opciones greybox — bloque API ───────────────────────────────
+# (el bloque SSO, de momento, solo se configura vía .env — GREYBOX_SSO_*)
+@click.option("--api-token", default=None,
+              help="Bearer token para la auditoría de API en modo greybox (ej: 'Bearer eyJ...')")
 @click.option("--api-doc", default=None, multiple=True,
               help="Ruta a colección Postman (.json) u OpenAPI (.yaml/.json). Repetible.")
 @click.option("--env-file", default=None,
               help="Ruta al entorno Postman (.json) con variables base_url, IDs, etc.")
-@click.option("--greybox-profile", default="normal", show_default=True,
+@click.option("--api-profile", default="normal", show_default=True,
               type=click.Choice(["normal", "aggressive"]),
-              help="Perfil de auditoría greybox: normal (por defecto) o aggressive")
+              help="Perfil de auditoría de API greybox: normal (por defecto) o aggressive")
 def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves,
-        output, verbose, token, api_doc, env_file, greybox_profile):
+        output, verbose, api_token, api_doc, env_file, api_profile):
     """
     recon-cli — Framework de reconocimiento y análisis de seguridad.
 
@@ -74,7 +75,7 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves,
     Ejemplos:\n
       ./recon-exec.sh ejemplo.com\n
       ./recon-exec.sh 1.2.3.4 --skip-leaks --verbose\n
-      ./recon-exec.sh ejemplo.com --scope greybox --token "Bearer eyJ..."\n
+      ./recon-exec.sh ejemplo.com --scope greybox --api-token "Bearer eyJ..."\n
       ./recon-exec.sh ejemplo.com --scope greybox --api-doc ./postman.json\n
       ./recon-exec.sh ejemplo.com --scope greybox --api-doc ./postman.json --api-doc ./openapi.yaml --env-file ./env_pre.json
     """
@@ -101,32 +102,58 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves,
     config["command"]    = command
     config["console"]    = console   # console compartido con record=True
 
-    # ── Configuración greybox — CLI tiene prioridad sobre .env ──
-    if token:
-        config["greybox_token"]          = token
-    elif config.get("GREYBOX_TOKEN"):
-        config["greybox_token"]          = config["GREYBOX_TOKEN"]
+    # ── Configuración greybox — bloque API — CLI tiene prioridad sobre .env
+    if api_token:
+        config["greybox_api_token"]          = api_token
+    elif config.get("GREYBOX_API_TOKEN"):
+        config["greybox_api_token"]          = config["GREYBOX_API_TOKEN"]
 
     if api_doc:
-        config["greybox_api_docs"]       = list(api_doc)
+        config["greybox_api_docs"]           = list(api_doc)
     elif config.get("GREYBOX_API_DOC"):
-        config["greybox_api_docs"]       = [config["GREYBOX_API_DOC"]]
+        config["greybox_api_docs"]           = [config["GREYBOX_API_DOC"]]
 
     if env_file:
-        config["greybox_env_file"]       = env_file
-    elif config.get("GREYBOX_ENV_FILE"):
-        config["greybox_env_file"]       = config["GREYBOX_ENV_FILE"]
+        config["greybox_api_env_file"]       = env_file
+    elif config.get("GREYBOX_API_ENV_FILE"):
+        config["greybox_api_env_file"]       = config["GREYBOX_API_ENV_FILE"]
 
-    # Client credentials desde .env (si no se informó token directo)
-    if not config.get("greybox_token"):
-        if config.get("GREYBOX_CLIENT_ID"):
-            config["greybox_client_id"]      = config["GREYBOX_CLIENT_ID"]
-        if config.get("GREYBOX_CLIENT_SECRET"):
-            config["greybox_client_secret"]  = config["GREYBOX_CLIENT_SECRET"]
-        if config.get("GREYBOX_TOKEN_ENDPOINT"):
-            config["greybox_token_endpoint"] = config["GREYBOX_TOKEN_ENDPOINT"]
+    # client_id se copia siempre que exista, aunque ya haya un token directo
+    # — lo reutiliza el check de open redirect independientemente de cómo
+    # se obtuvo el token. FIX: antes solo se copiaba "if not greybox_token",
+    # así que si había token Y client_id a la vez, el client_id real nunca
+    # llegaba y el check usaba uno inventado sin avisar.
+    if config.get("GREYBOX_API_CLIENT_ID"):
+        config["greybox_api_client_id"]      = config["GREYBOX_API_CLIENT_ID"]
 
-    config["greybox_profile"] = greybox_profile or config.get("GREYBOX_PROFILE", "normal")
+    # secret y token_endpoint solo son relevantes para el intercambio
+    # automático Client Credentials — no tiene sentido si ya hay token directo
+    if not config.get("greybox_api_token"):
+        if config.get("GREYBOX_API_CLIENT_SECRET"):
+            config["greybox_api_client_secret"]  = config["GREYBOX_API_CLIENT_SECRET"]
+        if config.get("GREYBOX_API_TOKEN_ENDPOINT"):
+            config["greybox_api_token_endpoint"] = config["GREYBOX_API_TOKEN_ENDPOINT"]
+
+    config["greybox_api_profile"] = api_profile or config.get("GREYBOX_API_PROFILE", "normal")
+
+    # ── Configuración greybox — bloque SSO — solo vía .env por ahora ────
+    # (no hay flags CLI equivalentes a --api-token/--api-doc/--env-file
+    # para SSO todavía — si se quieren añadir, es una ampliación aparte)
+    if config.get("GREYBOX_SSO_TOKEN"):
+        config["greybox_sso_token"]          = config["GREYBOX_SSO_TOKEN"]
+
+    if config.get("GREYBOX_SSO_CLIENT_ID"):
+        config["greybox_sso_client_id"]      = config["GREYBOX_SSO_CLIENT_ID"]
+
+    if not config.get("greybox_sso_token"):
+        if config.get("GREYBOX_SSO_CLIENT_SECRET"):
+            config["greybox_sso_client_secret"]  = config["GREYBOX_SSO_CLIENT_SECRET"]
+        if config.get("GREYBOX_SSO_TOKEN_ENDPOINT"):
+            config["greybox_sso_token_endpoint"] = config["GREYBOX_SSO_TOKEN_ENDPOINT"]
+
+    # ── Selección de submodo — atajo para saltar el menú [1/2/3] ────────
+    if config.get("GREYBOX_SUBMODE"):
+        config["greybox_submode"] = config["GREYBOX_SUBMODE"]
 
     target_info = validate_target(target)
     if not target_info:
@@ -227,44 +254,74 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves,
             f"del dominio raíz [bold]{root}[/bold] → sección separada en el informe"
         )
 
-    results["end_time"] = datetime.now()  # provisional para el PDF — se recalcula al final
-    results["duration"] = results["end_time"] - start_time
+    # Nombre base unificado: target_runid — todos los artefactos comparten prefijo
+    # Se construye aquí (antes de Greybox) para que greybox.py pueda usarlo
+    # en los JSON exports.
+    safe_target = target.replace(".", "_").replace("-", "_")
+    base_name   = f"{safe_target}_{run_id}"
+    config["base_name"]  = base_name
+    config["report_dir"] = config.get("REPORT_OUTPUT_DIR", "./reports/")
 
-    _print_summary(results)
+    # FIX (v1.2.1 — cambio bloqueante de release): Greybox pasa a ejecutarse
+    # ANTES de la correlación MITRE, y esta se ejecuta una única vez.
+    # MITRE ATT&CK correlaciona hallazgos ya existentes, no los genera —
+    # antes corría en la Fase 9 (antes de Greybox, Fase 10) y luego se
+    # repetía sin numerar tras Greybox para cubrir sus hallazgos. Esa
+    # segunda pasada delataba el problema: si hacía falta correlacionar
+    # otra vez después de Greybox, es que Greybox debía ir primero.
+    # Numeración resultante:
+    #   Blackbox: 1-8 igual, Fase 9 = MITRE, Fase 10 = PDF (sin cambios).
+    #   Greybox:  1-8 igual, Fase 9 = Greybox, Fase 10 = MITRE (una sola
+    #             vez, ya con todos los hallazgos), Fase 11 = PDF.
 
-    # ── FASE 9: Correlación MITRE ATT&CK ─────────────────────
-    _phase_header("9", "Correlación MITRE ATT&CK")
+    # ── FASE 9 (solo greybox): Greybox ────────────────────────
+    if scope == "greybox":
+        _phase_header("9", "Análisis Greybox")
+        from modules.greybox import run_greybox
+        greybox_results = run_greybox(target, target_info, config)
+        results["greybox"] = greybox_results
+
+        # Incorporar hallazgos greybox al pipeline principal — la
+        # correlación MITRE de la fase siguiente ya los cubre a todos,
+        # no hace falta correlacionar aquí también.
+        gb_findings = greybox_results.get("findings", [])
+        if gb_findings:
+            results["findings"].extend(gb_findings)
+            console.print(
+                f"  [green]✓[/green] {len(gb_findings)} hallazgo(s) greybox incorporados"
+            )
+
+    # ── FASE 9 (blackbox) / 10 (greybox): Correlación MITRE ATT&CK ──
+    mitre_phase = "10" if scope == "greybox" else "9"
+    _phase_header(mitre_phase, "Correlación MITRE ATT&CK")
     results["findings"] = enrich_findings_with_mitre(results["findings"], config)
     results["mitre_techniques"] = get_unique_techniques(results["findings"])
     console.print(
         f"  [green]✓[/green] {len(results['mitre_techniques'])} técnica(s) únicas identificadas"
     )
 
-    # Nombre base unificado: target_runid — todos los artefactos comparten prefijo
-    # Se construye aquí para que greybox.py pueda usarlo en los JSON exports
-    safe_target = target.replace(".", "_").replace("-", "_")
-    base_name   = f"{safe_target}_{run_id}"
-    config["base_name"]  = base_name
-    config["report_dir"] = config.get("REPORT_OUTPUT_DIR", "./reports/")
+    # ── Resumen consolidado de hallazgos ──────────────────────
+    # FIX (v1.2.1): antes se imprimía justo después de la Fase 8 (CVEs),
+    # antes de Greybox y MITRE — la consola mostraba un recuento que ya no
+    # coincidía con el informe final (p.ej. INFO=1 en consola vs INFO=7 en
+    # el PDF, porque los hallazgos de Greybox llegaban después). Se mueve
+    # aquí, con results["findings"] ya completo y correlacionado con
+    # MITRE, para que consola, JSON y PDF cuenten siempre la misma
+    # historia — un único resumen, no uno parcial más uno final.
+    _print_summary(results)
 
-    # ── FASE 10: Greybox (solo si --scope greybox) ───────────
-    if scope == "greybox":
-        _phase_header("10", "Análisis Greybox")
-        from modules.greybox import run_greybox
-        greybox_results = run_greybox(target, target_info, config)
-        results["greybox"] = greybox_results
+    # ── Duración real — hasta justo antes de generar el PDF ────
+    # FIX (v1.2.1): antes este recálculo se hacía DESPUÉS de llamar a
+    # generate_report(), así que el PDF siempre usaba el valor
+    # "provisional" fijado tras la Fase 8 (antes de Greybox y MITRE) —
+    # su "Duración" no incluía esas fases. Se recalcula aquí, justo antes
+    # de generar el informe, para que el PDF y la consola cuenten el
+    # mismo tiempo real. Lo único que queda fuera es el tiempo de
+    # escritura del propio PDF (siempre unos pocos segundos), asumible.
+    results["end_time"] = datetime.now()
+    results["duration"] = results["end_time"] - start_time
 
-        # Incorporar hallazgos greybox al pipeline principal
-        gb_findings = greybox_results.get("findings", [])
-        if gb_findings:
-            results["findings"].extend(gb_findings)
-            results["findings"] = enrich_findings_with_mitre(results["findings"], config)
-            results["mitre_techniques"] = get_unique_techniques(results["findings"])
-            console.print(
-                f"  [green]✓[/green] {len(gb_findings)} hallazgo(s) greybox incorporados"
-            )
-
-    # ── FASE 11 (o 10 en blackbox): PDF ──────────────────────
+    # ── FASE 10 (blackbox) / 11 (greybox): PDF ────────────────
     pdf_phase = "11" if scope == "greybox" else "10"
     _phase_header(pdf_phase, "Generando Informe PDF")
 
@@ -274,13 +331,7 @@ def cli(target, scope, skip_leaks, skip_shodan, skip_ssl, skip_waf, skip_cves,
     generate_report(results, pdf_path, config)
     console.print(f"\n[bold green][✓][/bold green] Informe: [underline]{pdf_path}[/underline]")
 
-    # ── Duración real — desde inicio hasta fin del PDF ────────
-    end_time = datetime.now()
-    duration = end_time - start_time
-    results["end_time"] = end_time
-    results["duration"] = duration
-
-    console.print(f"[bold green][✓][/bold green] Completado en {duration.seconds}s\n")
+    console.print(f"[bold green][✓][/bold green] Completado en {results['duration'].seconds}s\n")
 
     # ── Log TXT — al final del todo para capturar todas las líneas ──
     log_path = f"{config['report_dir']}{base_name}.log"
